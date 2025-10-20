@@ -1,0 +1,5 @@
+{
+  "name": "Banana Peel",
+  "description": "An AI-powered image generation and editing tool using Gemini's Nano Banana model. Generate images from text, or upload your own to edit. Select objects within your image to move, scale, rotate, and modify them with simple text prompts.",
+  "requestFramePermissions": []
+}
