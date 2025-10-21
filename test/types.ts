@@ -1,11 +1,9 @@
-import { BoundingBox, SelectableObject } from "../types";
-
-type EditMode = 'modify' | 'add' | null;
+import { BoundingBox, EditMode, HistoryState } from "../types";
 
 export type TestStatus = 'pending' | 'running' | 'passed' | 'failed';
 
 export interface AppState {
-    history: { url: string; mimeType: string }[];
+    history: HistoryState[];
     historyIndex: number;
     selectionBox: BoundingBox | null;
     editMode: EditMode;
@@ -13,7 +11,6 @@ export interface AppState {
     prompt: string;
     error: string | null;
     isLoading: boolean;
-    selectableObjects: SelectableObject[];
 }
 
 export interface AppTestHandles {

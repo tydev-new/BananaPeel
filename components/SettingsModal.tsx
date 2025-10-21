@@ -41,17 +41,26 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onSave }
         onClick={(e) => e.stopPropagation()}
       >
         <h2 id="settings-title" className="text-lg font-semibold text-white mb-4">
-          API Key Settings
+          Enter Your Gemini API Key
         </h2>
-        <p className="text-gray-400 mb-2 text-sm">
+        <p className="text-gray-400 mb-4 text-sm">
           Your Gemini API key is stored securely in your browser's local storage and is never sent to our servers.
         </p>
-        <p className="text-gray-400 mb-4 text-sm">
-          You can get your own API key from {' '}
-          <a href="https://ai.google.dev/gemini-api/docs/api-key" target="_blank" rel="noopener noreferrer" className="text-yellow-400 hover:underline">
-            Google AI Studio
-          </a>.
-        </p>
+
+        <div className="text-gray-400 mb-4 text-sm space-y-2">
+            <p>
+              Get your FREE key from{' '}
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-yellow-400 hover:underline">
+                Google AI Studio
+              </a>.
+            </p>
+            <ol className="list-decimal list-inside space-y-1 pl-2">
+                <li>Log in with your Google account.</li>
+                <li>Click "Get API key".</li>
+                <li>Click "Create API key".</li>
+                <li>Copy the key and paste it below.</li>
+            </ol>
+        </div>
 
         <label htmlFor="api-key" className="block text-sm font-medium text-gray-300 mb-1">
           Enter your Gemini API Key

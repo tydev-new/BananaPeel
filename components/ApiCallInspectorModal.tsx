@@ -81,6 +81,13 @@ const ApiCallInspectorModal: React.FC<ApiCallInspectorModalProps> = ({ isOpen, o
                   <h4 className="font-semibold text-gray-300 mb-2">Text Prompt</h4>
                   <pre className="bg-gray-900 p-3 rounded-md text-xs text-gray-300 whitespace-pre-wrap font-mono">{selectedCall.prompt || 'No text prompt provided.'}</pre>
                 </div>
+
+                {selectedCall.outputText && (
+                  <div className="mb-6">
+                    <h4 className="font-semibold text-gray-300 mb-2">Text Output</h4>
+                    <pre className="bg-gray-900 p-3 rounded-md text-xs text-gray-300 whitespace-pre-wrap font-mono">{selectedCall.outputText}</pre>
+                  </div>
+                )}
                 
                 {selectedCall.inputImages.length > 0 && (
                   <div className="mb-6">

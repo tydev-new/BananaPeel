@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { BoundingBox, ImagePositionInfo } from '../types';
+import { BoundingBox, ImagePositionInfo, EditMode } from '../types';
 import { LoadingSpinner } from './icons';
+
+// type EditMode = 'modify' | 'add' | 'pre_add' | null;
 
 interface CanvasAreaProps {
   imageUrl: string | null;
@@ -8,6 +10,7 @@ interface CanvasAreaProps {
   isLoading: boolean;
   isProcessingSelection: boolean;
   selectionBox: BoundingBox | null;
+  editMode: EditMode;
 }
 
 const CanvasArea: React.FC<CanvasAreaProps> = ({
@@ -16,6 +19,7 @@ const CanvasArea: React.FC<CanvasAreaProps> = ({
   isLoading,
   isProcessingSelection,
   selectionBox,
+  editMode,
 }) => {
   const [dragSelection, setDragSelection] = useState<BoundingBox | null>(null);
   const [startPoint, setStartPoint] = useState<{ x: number; y: number } | null>(
@@ -155,6 +159,13 @@ const CanvasArea: React.FC<CanvasAreaProps> = ({
     setDragSelection(null);
   };
   
+  const getCursorStyle = () => {
+      if (!imageUrl) return 'default';
+      if (selectionBox) return 'default';
+      if (editMode === 'pre_add') return 'crosshair';
+      return 'crosshair';
+  };
+
   return (
     <div className="flex-grow bg-gray-800 flex items-center justify-center overflow-hidden">
       <div
@@ -163,10 +174,10 @@ const CanvasArea: React.FC<CanvasAreaProps> = ({
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
-        style={{ cursor: imageUrl && !selectionBox ? 'crosshair' : 'default' }}
+        style={{ cursor: getCursorStyle() }}
       >
         {(isLoading || isProcessingSelection) && (
-          <div className="absolute inset-0 bg-gray-900 bg-opacity-70 flex flex-col items-center justify-center z-30">
+          <div className="absolute inset-0 bg-gray-900 bg-opacity-75 flex flex-col items-center justify-center z-30">
             <LoadingSpinner className="w-12 h-12 text-yellow-400" />
             <p className="mt-4 text-lg font-medium">
               {isProcessingSelection ? 'Analyzing selection...' : 'Processing...'}

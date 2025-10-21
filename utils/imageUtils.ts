@@ -79,46 +79,6 @@ export const getImageDimensions = (imageUrl: string): Promise<{width: number, he
   });
 };
 
-
-export const createFullSizeMask = (
-  imageWidth: number,
-  imageHeight: number,
-  maskUrl: string, // this is the small, cropped mask
-  box: BoundingBox,
-): Promise<string> => {
-  logger.debug(SOURCE, 'createFullSizeMask: Called.');
-  return new Promise((resolve, reject) => {
-    const maskImg = new Image();
-    maskImg.crossOrigin = "Anonymous";
-    maskImg.src = maskUrl;
-
-    maskImg.onload = () => {
-      logger.debug(SOURCE, 'createFullSizeMask: Mask image onload triggered.');
-      const canvas = document.createElement('canvas');
-      canvas.width = imageWidth;
-      canvas.height = imageHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        logger.error(SOURCE, 'createFullSizeMask: No context.');
-        return reject('No context');
-      }
-
-      ctx.fillStyle = 'black';
-      ctx.fillRect(0, 0, imageWidth, imageHeight);
-      ctx.drawImage(maskImg, box.x, box.y, box.width, box.height);
-      
-      const dataUrl = canvas.toDataURL('image/png');
-      logger.debug(SOURCE, `createFullSizeMask: Resolving with full size mask data URL of length ${dataUrl.length}`);
-      resolve(dataUrl);
-    };
-    maskImg.onerror = () => {
-        const errorMsg = 'Mask image could not be loaded for creating full size mask.';
-        logger.error(SOURCE, `createFullSizeMask: Mask image onerror triggered. ${errorMsg}`);
-        reject(new Error(errorMsg));
-    };
-  });
-};
-
 export const createMaskFromBox = (
   imageWidth: number,
   imageHeight: number,
@@ -203,5 +163,77 @@ export const analyzeMask = (maskUrl: string): Promise<{ isValid: boolean; analys
             reject(new Error(errorMsg));
         };
         img.src = maskUrl;
+    });
+};
+
+/**
+ * Clears a rectangular area in an image by filling it with the average color of its border.
+ * This is the first step of the 'Hard Delete' workflow.
+ * @param imageUrl The data URL of the image to modify.
+ * @param box The bounding box of the area to clear.
+ * @returns A promise that resolves to the data URL of the modified image.
+ */
+export const clearAreaWithBorderColor = (imageUrl: string, box: BoundingBox): Promise<string> => {
+    logger.debug(SOURCE, `clearAreaWithBorderColor: Called for box ${JSON.stringify(box)}`);
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = "Anonymous";
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            if (!ctx) {
+                return reject(new Error('Could not get canvas context for clearing area.'));
+            }
+
+            ctx.drawImage(img, 0, 0);
+
+            let totalR = 0, totalG = 0, totalB = 0, count = 0;
+            const sampleOffset = 2; // Sample pixels 2px outside the box
+
+            const samplePerimeter = () => {
+                const addPixel = (x: number, y: number) => {
+                    if (x >= 0 && x < img.naturalWidth && y >= 0 && y < img.naturalHeight) {
+                        const data = ctx.getImageData(x, y, 1, 1).data;
+                        totalR += data[0];
+                        totalG += data[1];
+                        totalB += data[2];
+                        count++;
+                    }
+                };
+
+                // Top and bottom borders
+                for (let i = 0; i < box.width; i++) {
+                    addPixel(box.x + i, box.y - sampleOffset);
+                    addPixel(box.x + i, box.y + box.height + sampleOffset);
+                }
+                // Left and right borders
+                for (let i = 0; i < box.height; i++) {
+                    addPixel(box.x - sampleOffset, box.y + i);
+                    addPixel(box.x + box.width + sampleOffset, box.y + i);
+                }
+            };
+
+            samplePerimeter();
+
+            if (count === 0) {
+                 logger.warn(SOURCE, 'clearAreaWithBorderColor: No perimeter pixels sampled. Defaulting to white fill.');
+                ctx.fillStyle = 'white';
+            } else {
+                const avgR = Math.round(totalR / count);
+                const avgG = Math.round(totalG / count);
+                const avgB = Math.round(totalB / count);
+                ctx.fillStyle = `rgb(${avgR}, ${avgG}, ${avgB})`;
+                logger.debug(SOURCE, `clearAreaWithBorderColor: Average border color: rgb(${avgR}, ${avgG}, ${avgB})`);
+            }
+            
+            ctx.fillRect(box.x, box.y, box.width, box.height);
+            
+            const dataUrl = canvas.toDataURL('image/png');
+            resolve(dataUrl);
+        };
+        img.onerror = () => reject(new Error('Image could not be loaded for clearing area.'));
+        img.src = imageUrl;
     });
 };

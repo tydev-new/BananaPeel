@@ -10,20 +10,19 @@ const RETRY_DELAY_MS = 1000;
 
 /**
  * Creates and returns a GoogleGenAI client instance.
- * It prioritizes a user-provided API key from localStorage.
- * If not found, it falls back to the environment variable.
+ * It requires a user-provided API key from localStorage.
  * This function is called on-demand by each service function.
  * @returns An instance of the GoogleGenAI client.
+ * @throws Will throw an error if the API key is not found.
  */
 const getGenAIClient = (): GoogleGenAI => {
     const userApiKey = getApiKey();
-    const apiKey = userApiKey || process.env.API_KEY;
-
-    if (!apiKey) {
-        throw new Error("API key is not available. Please set it in the settings or as an environment variable.");
+    
+    if (!userApiKey) {
+        throw new Error("API key not found. Please add it in Settings.");
     }
 
-    return new GoogleGenAI({ apiKey });
+    return new GoogleGenAI({ apiKey: userApiKey });
 };
 
 
@@ -78,7 +77,7 @@ async function callApiWithRetry<T>(apiName: string, apiCall: () => Promise<T>): 
  * @returns A promise that resolves to a structured object with modification details.
  */
 export const preprocessUserPrompt = async (userPrompt: string): Promise<PreprocessedPrompt> => {
-    logger.info(SOURCE, `preprocessUserPrompt: Called with prompt: "${userPrompt}"`);
+    logger.debug(SOURCE, `preprocessUserPrompt: Called with prompt: "${userPrompt}"`);
     const result = await callApiWithRetry('preprocessUserPrompt', async () => {
         const ai = getGenAIClient();
         const schema = {
@@ -103,7 +102,7 @@ export const preprocessUserPrompt = async (userPrompt: string): Promise<Preproce
             }
         };
 
-        logger.info(SOURCE, `preprocessUserPrompt - Prompt Sent: "${instruction}"`);
+        logger.debug(SOURCE, `preprocessUserPrompt - Prompt Sent: "${instruction}"`);
         const response = await ai.models.generateContent(payload);
         const jsonText = response.text;
         logger.debug(SOURCE, `preprocessUserPrompt: Received JSON response: ${jsonText}`);
@@ -127,7 +126,8 @@ export const preprocessUserPrompt = async (userPrompt: string): Promise<Preproce
         functionName: 'preprocessUserPrompt',
         prompt: `Analyze the user's instruction... The user's instruction is: "${userPrompt}". ...`,
         inputImages: [],
-        outputImages: [], // No image output, just logging the call for completeness
+        outputImages: [],
+        outputText: JSON.stringify(result, null, 2),
     });
     return result;
 };
@@ -139,7 +139,7 @@ export const preprocessUserPrompt = async (userPrompt: string): Promise<Preproce
  * @returns A promise that resolves to the data URL of the generated image.
  */
 export const generateImage = async (prompt: string): Promise<string> => {
-    logger.info(SOURCE, `generateImage: Called with prompt: "${prompt}"`);
+    logger.debug(SOURCE, `generateImage: Called with prompt: "${prompt}"`);
     const result = await callApiWithRetry('generateImage', async () => {
         const ai = getGenAIClient();
         const payload = {
@@ -153,7 +153,7 @@ export const generateImage = async (prompt: string): Promise<string> => {
                 responseModalities: [Modality.IMAGE],
             },
         };
-        logger.info(SOURCE, `generateImage - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `generateImage - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'generateImage: Received response from API.');
 
@@ -191,7 +191,7 @@ export const generateImage = async (prompt: string): Promise<string> => {
  * @returns A promise that resolves to the data URL of the edited image.
  */
 export const editImage = async (prompt: string, imageBase64: string, mimeType: string, imageWidth: number, imageHeight: number): Promise<string> => {
-    logger.info(SOURCE, `editImage: Called with prompt: "${prompt}"`);
+    logger.debug(SOURCE, `editImage: Called with prompt: "${prompt}"`);
     const fullPrompt = `Critical Constraint: The final output image MUST have a width of ${imageWidth} pixels and a height of ${imageHeight} pixels. This is a non-negotiable requirement.\n\nApply the following instruction to the entire image: "${prompt}"`;
     
     const result = await callApiWithRetry('editImage', async () => {
@@ -208,7 +208,7 @@ export const editImage = async (prompt: string, imageBase64: string, mimeType: s
                 responseModalities: [Modality.IMAGE],
             },
         };
-        logger.info(SOURCE, `editImage - Prompt Sent: "${fullPrompt}"`);
+        logger.debug(SOURCE, `editImage - Prompt Sent: "${fullPrompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'editImage: Received response from API.');
 
@@ -257,7 +257,7 @@ export const describeObject = async (imageBase64: string, mimeType: string): Pro
                 ],
             },
         };
-        logger.info(SOURCE, `describeObject - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `describeObject - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         const description = response.text.trim().toLowerCase().replace(/[."]/g, '');
         logger.debug(SOURCE, `describeObject: Received response from API. Text: "${description}"`);
@@ -269,98 +269,37 @@ export const describeObject = async (imageBase64: string, mimeType: string): Pro
         prompt: prompt,
         inputImages: [{ label: 'Cropped Object', url: `data:${mimeType};base64,${imageBase64}` }],
         outputImages: [],
+        outputText: result,
     });
     return result;
 };
 
 /**
- * Creates a precise black and white segmentation mask for an object in an image.
- * If the model determines it cannot create a good mask, it will return null.
- * @param imageBase64 The base64 encoded string of the cropped image.
- * @param mimeType The MIME type of the image.
- * @param objectDescription The description of the object to mask.
- * @returns A promise that resolves to the data URL of the mask image, or null on predictable failure.
- */
-export const createPreciseMask = async (imageBase64: string, mimeType: string, objectDescription: string): Promise<string | null> => {
-    logger.info(SOURCE, `createPreciseMask: Called with description: "${objectDescription}"`);
-    const prompt = `Your primary objective is to determine if a high-fidelity segmentation mask can be created for the '${objectDescription}' in the provided image.
-
-**Condition 1: If a clear, unambiguous mask IS possible:**
-- Generate an image with a solid, pure dark black background (#000000).
-- On this background, draw a solid white silhouette of the '${objectDescription}'.
-- CRITICAL: The white silhouette's position, size, and shape must be an exact one-to-one match with the object in the original input image. Do not move, resize, or re-center it.
-
-**Condition 2: If the object's borders are too ambiguous, indistinct, or blended with the background to create a precise mask:**
-- You MUST abandon image generation.
-- Your ONLY response must be the exact text: MASK_GENERATION_FAILED`;
-    
-    const result = await callApiWithRetry('createPreciseMask', async () => {
-        const ai = getGenAIClient();
-        const payload = {
-            model: 'gemini-2.5-flash-image',
-            contents: {
-                parts: [
-                    { inlineData: { data: imageBase64, mimeType: mimeType } },
-                    { text: prompt },
-                ],
-            },
-            config: {
-                responseModalities: [Modality.IMAGE],
-            },
-        };
-        logger.info(SOURCE, `createPreciseMask - Prompt Sent: "${prompt}"`);
-        const response = await ai.models.generateContent(payload);
-        logger.debug(SOURCE, 'createPreciseMask: Received response from API.');
-        
-        // Check for text-based failure signal first
-        if (response.text?.trim() === 'MASK_GENERATION_FAILED') {
-            logger.warn(SOURCE, 'createPreciseMask: Model signaled failure to generate mask.');
-            return null;
-        }
-
-        const parts = response.candidates?.[0]?.content?.parts;
-        if (Array.isArray(parts)) {
-            for (const part of parts) {
-                if (part.inlineData) {
-                    logger.debug(SOURCE, 'createPreciseMask: Found image part in response.');
-                    const base64ImageBytes: string = part.inlineData.data;
-                    const imageMimeType = part.inlineData.mimeType;
-                    return `data:${imageMimeType};base64,${base64ImageBytes}`;
-                }
-            }
-        }
-        
-        logger.error(SOURCE, 'createPreciseMask: No image part in response and no failure signal.');
-        throw new Error('Mask creation failed, no image part in response.');
-    });
-    
-    addApiCallRecord({
-        functionName: 'createPreciseMask',
-        prompt: prompt,
-        inputImages: [{ label: 'Cropped Object', url: `data:${mimeType};base64,${imageBase64}` }],
-        outputImages: result ? [{ label: 'Generated Mask', url: result }] : [],
-    });
-    return result;
-};
-
-/**
- * Removes an object from an image and fills in the background.
+ * Removes an object from an image and fills in the background using a simple box mask and a text description for context.
  * @param imageBase64 The base64 of the original image.
  * @param mimeType The mime type of the original image.
- * @param maskBase64 The base64 of the full-size mask of the object to remove.
+ * @param maskBase64 The base64 of the full-size rectangular mask of the object to remove.
  * @param imageWidth The width of the image.
  * @param imageHeight The height of the image.
+ * @param objectDescription A text description of the object to remove, providing semantic context.
  * @returns The data URL of the image with the object removed.
  */
-export const inpaintBackground = async (imageBase64: string, mimeType: string, maskBase64: string, imageWidth: number, imageHeight: number): Promise<string> => {
+export const inpaintBackground = async (imageBase64: string, mimeType: string, maskBase64: string, imageWidth: number, imageHeight: number, objectDescription: string): Promise<string> => {
     logger.info(SOURCE, 'inpaintBackground: Called.');
     const prompt = `Critical Constraint: The final output image MUST have a width of ${imageWidth} pixels and a height of ${imageHeight} pixels. This is a non-negotiable requirement.
 
-You will be given two images as input:
-1.  An **Original Image** that contains an object to be removed.
-2.  A **Mask Image**, where a white shape indicates the exact location and boundaries of the object to be removed.
+Global Constraint: You MUST NOT alter any part of the Original Image that falls outside the white rectangle defined in the Mask Image. The overall style, lighting, and other objects must be perfectly preserved.
 
-Your task is to analyze these inputs and generate a new version of the Original Image where the object defined by the white area of the Mask Image has been completely removed. You must realistically fill in the background where the object was, ensuring the new area seamlessly matches the surrounding artistic style, lighting, and texture for a photorealistic result.`;
+You will be given three inputs:
+1.  An **Original Image**.
+2.  A **Mask Image** that contains a simple white rectangle, indicating the area of operation.
+3.  An **Object Description** which specifies the target object to remove.
+
+Your task is to generate a new image by following this conditional logic:
+
+1.  **Primary Goal:** First, analyze the area inside the white rectangle of the Mask Image to locate an object that matches the **Object Description** ('${objectDescription}'). If you find a clear match, you must completely remove ONLY that specific object and then realistically fill in the cleared area. The new background must seamlessly match the surrounding artistic style, lighting, and texture.
+
+2.  **Fallback Goal:** If, and only if, you CANNOT find a clear match for the Object Description inside the rectangle, then you must **remove all content** within the white rectangle of the Mask Image and then realistically fill in the cleared area. The new background must seamlessly match the surrounding artistic style, lighting, and texture.`;
     
     const result = await callApiWithRetry('inpaintBackground', async () => {
         const ai = getGenAIClient();
@@ -378,7 +317,7 @@ Your task is to analyze these inputs and generate a new version of the Original 
             },
         };
 
-        logger.info(SOURCE, `inpaintBackground - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `inpaintBackground - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'inpaintBackground: Received response from API.');
 
@@ -425,7 +364,7 @@ export const addModifiedObject = async (inpaintedBase64: string, inpaintedMimeTy
 
 Your task is to modify a reference object and place it onto a background image. You will be given:
 1.  A background image where the original object has been removed.
-2.  A mask indicating the object's **original position and scale**.
+2.  A mask (a simple white rectangle) indicating the object's **original position and scale**.
 3.  A reference image of the original object.
 4.  A set of structured instructions.
 
@@ -455,7 +394,7 @@ Finally, place this newly modified object onto the background image at its final
                 responseModalities: [Modality.IMAGE],
             },
         };
-        logger.info(SOURCE, `addModifiedObject - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `addModifiedObject - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'addModifiedObject: Received response from API.');
 
@@ -497,10 +436,20 @@ Finally, place this newly modified object onto the background image at its final
  * @returns The data URL of the image with the new object.
  */
 export const addObjectToImage = async (imageBase64: string, mimeType: string, maskBase64: string, prompt: string, imageWidth: number, imageHeight: number): Promise<string> => {
-    logger.info(SOURCE, `addObjectToImage: Called with prompt: "${prompt}"`);
+    logger.debug(SOURCE, `addObjectToImage: Called with prompt: "${prompt}"`);
     const fullPrompt = `Critical Constraint: The final output image MUST have a width of ${imageWidth} pixels and a height of ${imageHeight} pixels. This is a non-negotiable requirement.
 
-Add the following object into the area defined by the provided white mask: "${prompt}"`;
+You will be given two inputs:
+1.  An **Original Image**.
+2.  A **Mask Image** where a white rectangle indicates the exact location and size for the new object.
+
+Your task is to generate a new version of the Original Image that includes a new object. The object to add is: "${prompt}"
+
+This new object must be placed exclusively within the area defined by the white rectangle in the **Mask Image**. The Mask Image is a guide for placement and scale only.
+
+**CRITICAL INSTRUCTION:** The white rectangle from the Mask Image itself **MUST NOT** be visible in the final output image. Your final image should only contain the Original Image's content plus the newly added object, seamlessly blended.
+
+Finally, ensure the newly added object is seamlessly blended with its surroundings, matching the original image's artistic style, lighting, and shadows for a cohesive result.`;
     
     const result = await callApiWithRetry('addObjectToImage', async () => {
         const ai = getGenAIClient();
@@ -518,7 +467,7 @@ Add the following object into the area defined by the provided white mask: "${pr
             },
         };
 
-        logger.info(SOURCE, `addObjectToImage - Prompt Sent: "${fullPrompt}"`);
+        logger.debug(SOURCE, `addObjectToImage - Prompt Sent: "${fullPrompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'addObjectToImage: Received response from API.');
 
@@ -541,6 +490,81 @@ Add the following object into the area defined by the provided white mask: "${pr
         prompt: fullPrompt,
         inputImages: [
             { label: 'Original Image', url: `data:${mimeType};base64,${imageBase64}` },
+            { label: 'Mask', url: `data:image/png;base64,${maskBase64}` },
+        ],
+        outputImages: [{ label: 'Final Image', url: result }],
+    });
+    return result;
+};
+
+/**
+ * Fills a pre-cleared, solid-colored area in an image, blending it with the surroundings.
+ * This is the second, AI-powered step of the 'Hard Delete' workflow.
+ * @param imageBase64 The base64 of the image with a cleared area.
+ * @param mimeType The mime type of the image.
+ * @param maskBase64 The base64 of the mask indicating the area to fill.
+ * @param imageWidth The width of the image.
+ * @param imageHeight The height of the image.
+ * @param objectDescription A description of the object that was just removed, to be used as a negative constraint.
+ * @returns The data URL of the final, smoothed image.
+ */
+export const smoothClearedArea = async (imageBase64: string, mimeType: string, maskBase64: string, imageWidth: number, imageHeight: number, objectDescription: string): Promise<string> => {
+    logger.info(SOURCE, 'smoothClearedArea: Called.');
+    const prompt = `Critical Constraint: The final output image MUST have a width of ${imageWidth} pixels and a height of ${imageHeight} pixels. This is a non-negotiable requirement.
+
+You will be given two inputs:
+1.  An **Input Image** that contains a cleared, solid-colored rectangular area.
+2.  A **Mask Image** where a white rectangle indicates the exact location and boundaries of this cleared area.
+
+Your task is to intelligently reconstruct the background in the cleared area.
+
+**Principle of Background Reconstruction:** Your goal is to create the simplest possible background that seamlessly continues the patterns and textures from the surrounding area.
+
+**Examples of Correct Behavior:**
+- If the cleared area is on a wooden table that had a fruit bowl on it, the fill should be the wood grain of the table, not more fruit.
+- If the cleared area is on a window that had a curtain in front of it, the fill should be the view through the window, not more curtain fabric.
+
+**CRITICAL NEGATIVE CONSTRAINT:** You MUST NOT regenerate the object described as '${objectDescription}', or any object similar to it, within the cleared area.`;
+
+    const result = await callApiWithRetry('smoothClearedArea', async () => {
+        const ai = getGenAIClient();
+        const payload = {
+            model: 'gemini-2.5-flash-image',
+            contents: {
+                parts: [
+                    { inlineData: { data: imageBase64, mimeType: mimeType } },
+                    { inlineData: { data: maskBase64, mimeType: 'image/png' } },
+                    { text: prompt },
+                ],
+            },
+            config: {
+                responseModalities: [Modality.IMAGE],
+            },
+        };
+
+        logger.debug(SOURCE, `smoothClearedArea - Prompt Sent: "${prompt}"`);
+        const response = await ai.models.generateContent(payload);
+        logger.debug(SOURCE, 'smoothClearedArea: Received response from API.');
+
+        const parts = response.candidates?.[0]?.content?.parts;
+        if (Array.isArray(parts)) {
+            for (const part of parts) {
+                if (part.inlineData) {
+                    const base64ImageBytes: string = part.inlineData.data;
+                    const imageMimeType = part.inlineData.mimeType;
+                    return `data:${imageMimeType};base64,${base64ImageBytes}`;
+                }
+            }
+        }
+        logger.error(SOURCE, 'smoothClearedArea: No image part in response.');
+        throw new Error('Smoothing cleared area failed, no image part in response.');
+    });
+
+    addApiCallRecord({
+        functionName: 'smoothClearedArea',
+        prompt: prompt,
+        inputImages: [
+            { label: 'Cleared Image', url: `data:${mimeType};base64,${imageBase64}` },
             { label: 'Mask', url: `data:image/png;base64,${maskBase64}` },
         ],
         outputImages: [{ label: 'Final Image', url: result }],
@@ -577,7 +601,7 @@ Finally, describe the background and the overall artistic style and lighting of 
                 ],
             },
         };
-        logger.info(SOURCE, `describeImageInDetail - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `describeImageInDetail - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         const description = response.text.trim();
         logger.debug(SOURCE, `describeImageInDetail: Received response from API. Text: "${description}"`);
@@ -589,19 +613,44 @@ Finally, describe the background and the overall artistic style and lighting of 
         prompt: prompt,
         inputImages: [{ label: 'Original Image', url: `data:${mimeType};base64,${imageBase64}` }],
         outputImages: [],
+        outputText: result,
     });
     return result;
 };
 
 /**
- * Compares two text descriptions and returns a summary of the changes.
+ * Compares two text descriptions and returns a structured, categorized summary of the changes.
+ * This is the core 'diff' engine for the Structured Edit feature.
  * @param originalDescription The original text.
  * @param editedDescription The user-edited text.
- * @returns A promise that resolves to a concise summary of the edits.
+ * @returns A promise that resolves to a concise, categorized summary of the edits.
  */
 const _getStructuredPromptDelta = async (originalDescription: string, editedDescription: string): Promise<string> => {
     logger.info(SOURCE, '_getStructuredPromptDelta: Called.');
-    const prompt = `You are an expert in analyzing text changes. Compare the 'Original Description' with the 'Edited Description'. Your task is to return a concise, natural-language summary of only the changes that were made. For example, if 'a red car' was changed to 'a blue sports car', your response should be 'change the red car to a blue sports car'. Do not describe parts that are unchanged.
+    const prompt = `You are an expert prompt engineer instructing an AI image model. Compare the 'Original Description' of an image with the 'Edited Description'. Your task is to generate a list of direct, imperative commands for the image model that will transform the original image into the edited one.
+
+**CRITICAL RULES FOR OUTPUT:**
+1.  **Categorize Commands:** Group the commands into the following categories: 'REMOVED OBJECT', 'MODIFIED OBJECT', 'ADDED OBJECT', 'BACKGROUND', and 'STYLE'.
+2.  **Use a Commanding Tone:** All output must be a direct command (e.g., "Change the red square to a purple square").
+3.  **Be Specific on Removals:** For 'REMOVED OBJECT', provide a detailed description of the object and its location.
+4.  **Preserve Detail on Additions:** For 'ADDED OBJECT', provide the full, detailed description of the new object.
+5.  **Handle Multiple Items:** If there are multiple commands in one category, list each as a separate bullet point (\`-\`).
+6.  **Ignore Numbers:** Ignore any list numbers from the input descriptions. Your output must not contain list numbers.
+
+**Example Output Format:**
+REMOVED OBJECT:
+- Remove the blue circle from the center of the image.
+MODIFIED OBJECT:
+- Change the large red square in the top-left to a large purple square.
+- Change the green triangle in the bottom-right to an orange triangle.
+ADDED OBJECT:
+- Add a photorealistic black octagon in the top right corner, casting a soft shadow onto the background.
+BACKGROUND:
+- Change the background from an indoor scene to an outdoor beach scene.
+STYLE:
+- Change the overall style to photorealistic.
+
+Only output commands for parts that have changed. If there are no changes in a category, omit it.
 
 Original Description:
 ${originalDescription}
@@ -615,7 +664,7 @@ ${editedDescription}`;
             model: 'gemini-2.5-flash',
             contents: { parts: [{ text: prompt }] },
         };
-        logger.info(SOURCE, `_getStructuredPromptDelta - Prompt Sent: "${prompt}"`);
+        logger.debug(SOURCE, `_getStructuredPromptDelta - Prompt Sent: "${prompt}"`);
         const response = await ai.models.generateContent(payload);
         const delta = response.text.trim();
         logger.debug(SOURCE, `_getStructuredPromptDelta: Received delta from API: "${delta}"`);
@@ -627,6 +676,7 @@ ${editedDescription}`;
         prompt: prompt,
         inputImages: [],
         outputImages: [],
+        outputText: result,
     });
     return result;
 };
@@ -648,9 +698,10 @@ export const editImageWithStructuredPrompt = async (originalDescription: string,
     
     const fullPrompt = `Critical Constraint: The final output image MUST have a width of ${imageWidth} pixels and a height of ${imageHeight} pixels. This is a non-negotiable requirement.
 
-Apply the following edit to the provided image: "${delta}"
+Apply the following list of edits to the provided image:
+${delta}
 
-Preserve all other aspects of the image that are not related to this edit.`;
+Preserve all other aspects of the image that are not related to these edits.`;
 
     const result = await callApiWithRetry('editImageWithStructuredPrompt', async () => {
         const ai = getGenAIClient();
@@ -666,7 +717,7 @@ Preserve all other aspects of the image that are not related to this edit.`;
                 responseModalities: [Modality.IMAGE],
             },
         };
-        logger.info(SOURCE, `editImageWithStructuredPrompt - Prompt Sent: "${fullPrompt}"`);
+        logger.debug(SOURCE, `editImageWithStructuredPrompt - Prompt Sent: "${fullPrompt}"`);
         const response = await ai.models.generateContent(payload);
         logger.debug(SOURCE, 'editImageWithStructuredPrompt: Received response from API.');
 
