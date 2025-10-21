@@ -17,21 +17,6 @@ export interface ImagePositionInfo {
   naturalHeight: number;
 }
 
-// FIX: Add Transform and SelectableObject types to resolve module resolution errors.
-export interface Transform {
-  x: number;
-  y: number;
-  scale: number;
-  rotation: number;
-}
-
-export interface SelectableObject {
-  id: string;
-  originalBox: BoundingBox;
-  displayImageUrl: string;
-  transform: Transform;
-}
-
 export interface ApiImage {
   label: string;
   url: string;
@@ -44,4 +29,15 @@ export interface ApiCallRecord {
   prompt: string;
   inputImages: ApiImage[];
   outputImages: ApiImage[];
+  outputText?: string;
+}
+
+// Add shared EditMode and PromptMode types.
+export type EditMode = 'modify' | 'add' | 'pre_add' | null;
+export type PromptMode = 'freeform' | 'structured';
+
+export interface HistoryState {
+  url: string;
+  mimeType: string;
+  structuredDescription?: string | null;
 }

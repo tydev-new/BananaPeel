@@ -6,17 +6,15 @@ import LogViewer from './components/LogViewer';
 import ConfirmationModal from './components/ConfirmationModal';
 import SettingsModal from './components/SettingsModal';
 import ApiCallInspectorModal from './components/ApiCallInspectorModal';
-import { BoundingBox, ApiCallRecord } from './types';
+import ExpandedEditModal from './components/ExpandedEditModal';
+import { BoundingBox, ApiCallRecord, EditMode, PromptMode, HistoryState } from './types';
 import * as geminiService from './services/geminiService';
 import * as imageUtils from './utils/imageUtils';
 import * as apiKeyStore from './utils/apiKeyStore';
 import * as apiCallHistoryStore from './utils/apiCallHistory';
 import { AppState, AppTestHandles } from './test/types';
 import { logger, LogLevel } from './utils/logger';
-import { DownloadIcon, RedoIcon, UndoIcon } from './components/icons';
-
-type EditMode = 'modify' | 'add' | null;
-type PromptMode = 'freeform' | 'structured';
+import { DownloadIcon, PlusIcon, RedoIcon, UndoIcon } from './components/icons';
 
 // This defines a complete, atomic snapshot of the data needed to delete an object.
 type DeleteActionData = {
@@ -29,8 +27,8 @@ type DeleteActionData = {
 };
 
 type ConfirmationAction =
-    | { type: 'newImage'; message: string }
-    | { type: 'deleteObject'; message: string; data: DeleteActionData };
+    | { type: 'newImage' }
+    | { type: 'deleteObject'; data: DeleteActionData };
 
 
 type AppHandlers = Omit<AppTestHandles, 'getState' | 'setPrompt' | 'setLogger'>;
@@ -39,7 +37,7 @@ const SOURCE = 'App';
 
 const App: React.FC = () => {
     // History state
-    const [history, setHistory] = useState<{ url: string; mimeType: string }[]>([]);
+    const [history, setHistory] = useState<HistoryState[]>([]);
     const [historyIndex, setHistoryIndex] = useState<number>(-1);
 
     // UI/Loading state
@@ -49,7 +47,8 @@ const App: React.FC = () => {
     const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
     const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-    const [confirmationProps, setConfirmationProps] = useState<ConfirmationAction | null>(null);
+    const [confirmationAction, setConfirmationAction] = useState<ConfirmationAction | null>(null);
+    const [isExpandedEditModalOpen, setIsExpandedEditModalOpen] = useState(false);
 
     // Selection/Editing state
     const [selectionBox, setSelectionBox] = useState<BoundingBox | null>(null);
@@ -86,7 +85,7 @@ const App: React.FC = () => {
     }, [history, historyIndex]);
 
     const isInEditState = !!currentImage;
-    const isSubEditing = useMemo(() => editMode === 'modify' || editMode === 'add', [editMode]);
+    const isSubEditing = useMemo(() => editMode === 'modify' || editMode === 'add' || editMode === 'pre_add', [editMode]);
 
     const canUndo = useMemo(() => historyIndex > 0, [historyIndex]);
     const canRedo = useMemo(() => historyIndex < history.length - 1, [historyIndex, history]);
@@ -112,7 +111,7 @@ const App: React.FC = () => {
     // Effect to reset prompt mode on undo/redo
     useEffect(() => {
         if (historyIndex !== -1) {
-            logger.info(SOURCE, `useEffect[historyIndex]: History changed to index ${historyIndex}. Resetting prompt mode to freeform.`);
+            logger.info(SOURCE, `useEffect[historyIndex]: History changed to index ${historyIndex}. Resetting prompt mode and clearing prompt.`);
             setPromptMode('freeform');
             setPrompt('');
             setOriginalStructuredPrompt(null);
@@ -122,12 +121,12 @@ const App: React.FC = () => {
     // --- History Management ---
     const addHistoryState = useCallback(async (newImage: { url: string; mimeType: string }) => {
         const newHistory = history.slice(0, historyIndex + 1);
-        newHistory.push(newImage);
+        const newHistoryItem: HistoryState = { ...newImage, structuredDescription: null };
+        newHistory.push(newHistoryItem);
         logger.info(SOURCE, `STATE: Adding to history. New length: ${newHistory.length}, new index: ${newHistory.length - 1}.`);
         setHistory(newHistory);
         setHistoryIndex(newHistory.length - 1);
 
-        // Set session dimensions if this is the first image in a new session.
         if (newHistory.length === 1) {
             logger.info(SOURCE, 'Setting new session image dimensions from generated image.');
             const dims = await imageUtils.getImageDimensions(newImage.url);
@@ -165,18 +164,15 @@ const App: React.FC = () => {
         setSelectionBox(null);
         setEditMode(null);
         setOriginalObjectDescription(null);
-        setSessionLogs([]); // Also clear logs on reset
-        setSessionImageDimensions(null); // Clear session dimensions
-        setPromptMode('freeform'); // Reset prompt mode
-        setOriginalStructuredPrompt(null); // Reset structured prompt state
+        setSessionLogs([]);
+        setSessionImageDimensions(null);
+        setPromptMode('freeform');
+        setOriginalStructuredPrompt(null);
     }, []);
 
     const handleNewImage = useCallback(() => {
         logger.info(SOURCE, 'handleNewImage: Called.');
-        setConfirmationProps({
-            message: "Starting a new image will clear your current canvas and history. Are you sure you want to continue?",
-            type: 'newImage',
-        });
+        setConfirmationAction({ type: 'newImage' });
     }, []);
     
 
@@ -199,8 +195,9 @@ const App: React.FC = () => {
                         errorMessage = "The prompt was blocked for safety reasons. Please try a different prompt.";
                     } else if (nestedMessage.toLowerCase().includes('api key not valid')) {
                         errorMessage = "Your API key is not valid. Please check it in Settings.";
-                    } else if (nestedMessage.toLowerCase().includes('api key is not available')) {
+                    } else if (nestedMessage.toLowerCase().includes('api key not found')) {
                         errorMessage = "API key not found. Please add it in Settings.";
+                        setIsSettingsModalOpen(true);
                     }
                     else {
                         errorMessage = nestedMessage;
@@ -222,6 +219,21 @@ const App: React.FC = () => {
 
     const handleGenerate = useCallback(async () => {
         logger.info(SOURCE, 'handleGenerate: Called.');
+
+        // --- USER INTENT LOGGING ---
+        if (promptMode === 'structured') {
+            logger.info(SOURCE, `USER_INTENT [structured edit]: Applying changes from structured description.`);
+        } else if (editMode === 'modify') {
+            logger.info(SOURCE, `USER_INTENT [modify]: "${prompt}"`);
+        } else if (editMode === 'add') {
+            logger.info(SOURCE, `USER_INTENT [add]: "${prompt}"`);
+        } else if (isInEditState) {
+            logger.info(SOURCE, `USER_INTENT [global edit]: "${prompt}"`);
+        } else {
+            logger.info(SOURCE, `USER_INTENT [generate]: "${prompt}"`);
+        }
+        // --- END LOGGING ---
+
         await withLoading(async () => {
             let newImageUrl: string | undefined;
 
@@ -247,23 +259,12 @@ const App: React.FC = () => {
 
                 const currentImageDims = await imageUtils.getImageDimensions(currentImage.url);
 
-                if (editMode === 'modify') {
+                if (editMode === 'modify' && originalObjectDescription) {
                     logger.info(SOURCE, 'handleGenerate: Modifying existing object.');
                     const preprocessed = await geminiService.preprocessUserPrompt(prompt);
                     const objectImageBase64 = await imageUtils.cropImage(currentImage.url, selectionBox);
-                    const description = originalObjectDescription || 'the selected object';
                     
-                    let fullMaskUrl: string;
-                    const preciseMaskUrl = await geminiService.createPreciseMask(objectImageBase64, 'image/png', description);
-                    
-                    if (preciseMaskUrl) {
-                        logger.info(SOURCE, 'AI mask generation successful. Creating full size mask.');
-                        fullMaskUrl = await imageUtils.createFullSizeMask(currentImageDims.width, currentImageDims.height, preciseMaskUrl, selectionBox);
-                    } else {
-                        logger.warn(SOURCE, 'AI mask generation failed. Falling back to box mask.');
-                        fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, selectionBox);
-                    }
-
+                    const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, selectionBox);
                     const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
                     
                     const inpaintedImageUrl = await geminiService.inpaintBackground(
@@ -271,7 +272,8 @@ const App: React.FC = () => {
                         currentImage.mimeType,
                         maskBase64,
                         sessionImageDimensions.width,
-                        sessionImageDimensions.height
+                        sessionImageDimensions.height,
+                        originalObjectDescription
                     );
 
                     newImageUrl = await geminiService.addModifiedObject(
@@ -330,7 +332,7 @@ const App: React.FC = () => {
             const dataUrl = `data:${mimeType};base64,${base64}`;
             
             logger.info(SOURCE, 'handleUpload: Starting new history session with uploaded image.');
-            setHistory([{ url: dataUrl, mimeType: mimeType }]);
+            setHistory([{ url: dataUrl, mimeType: mimeType, structuredDescription: null }]);
             setHistoryIndex(0);
             
             logger.info(SOURCE, 'Setting new session image dimensions from uploaded image.');
@@ -345,6 +347,13 @@ const App: React.FC = () => {
 
     const handleSelect = useCallback(async (box: BoundingBox) => {
         logger.info(SOURCE, `handleSelect: Called with box: ${JSON.stringify(box)}`);
+        
+        if (editMode === 'pre_add') {
+            logger.info(SOURCE, `handleSelect: In 'pre_add' mode. Transitioning to 'add' mode.`);
+            setEditMode('add');
+            setSelectionBox(box);
+            return;
+        }
         
         await withLoading(async () => {
             if (!currentImage) return;
@@ -364,7 +373,7 @@ const App: React.FC = () => {
             }
             setSelectionBox(box); // Set selection box after analysis
         }, 'processing');
-    }, [currentImage, withLoading]);
+    }, [currentImage, withLoading, editMode]);
     
     const handleClearSelection = useCallback(() => {
         logger.info(SOURCE, 'handleClearSelection: Called.');
@@ -376,15 +385,30 @@ const App: React.FC = () => {
         setOriginalStructuredPrompt(null);
     }, []);
     
+    const handleRequestAddObject = useCallback(() => {
+        logger.info(SOURCE, 'handleRequestAddObject: Called.');
+        handleClearSelection(); // Clear any existing selection first
+        setEditMode('pre_add');
+    }, [handleClearSelection]);
+    
     const handleSetPromptMode = useCallback(async (mode: PromptMode) => {
         logger.info(SOURCE, `handleSetPromptMode: Switching to ${mode} mode.`);
         setPromptMode(mode);
 
         if (mode === 'structured') {
+            const currentHistoryItem = history[historyIndex];
+            if (currentHistoryItem?.structuredDescription) {
+                logger.info(SOURCE, 'handleSetPromptMode: Using cached structured description.');
+                setPrompt(currentHistoryItem.structuredDescription);
+                setOriginalStructuredPrompt(currentHistoryItem.structuredDescription);
+                return;
+            }
+
             await withLoading(async () => {
                 if (!currentImage) {
                     throw new Error("Cannot generate structured prompt without an image.");
                 }
+                logger.info(SOURCE, 'handleSetPromptMode: Generating new structured description.');
                 setPrompt("Generating detailed description...");
                 const description = await geminiService.describeImageInDetail(
                     imageUtils.getBase64FromDataUrl(currentImage.url),
@@ -392,12 +416,21 @@ const App: React.FC = () => {
                 );
                 setPrompt(description);
                 setOriginalStructuredPrompt(description);
+
+                logger.info(SOURCE, 'handleSetPromptMode: Caching new structured description to history.');
+                setHistory(prevHistory => {
+                    const newHistory = [...prevHistory];
+                    if (newHistory[historyIndex]) {
+                        newHistory[historyIndex] = { ...newHistory[historyIndex], structuredDescription: description };
+                    }
+                    return newHistory;
+                });
             }, 'processing');
         } else {
             setPrompt(''); // Clear prompt when switching back to freeform
             setOriginalStructuredPrompt(null);
         }
-    }, [currentImage, withLoading]);
+    }, [currentImage, withLoading, history, historyIndex]);
 
     const handleRequestDeleteObject = useCallback(() => {
         logger.info(SOURCE, 'handleRequestDeleteObject: Called.');
@@ -405,8 +438,7 @@ const App: React.FC = () => {
             logger.error(SOURCE, 'handleRequestDeleteObject: Cannot delete, missing selection data or current image.');
             return;
         }
-        setConfirmationProps({
-            message: "This will permanently remove the selected object. This action can be undone. Are you sure?",
+        setConfirmationAction({
             type: 'deleteObject',
             data: {
                 box: selectionBox,
@@ -419,68 +451,84 @@ const App: React.FC = () => {
         });
     }, [selectionBox, originalObjectDescription, currentImage]);
 
-    const handleConfirm = useCallback(async () => {
-        if (!confirmationProps) return;
+    // "Smart Delete" flow
+    const handleConfirmDelete = useCallback(async () => {
+        if (confirmationAction?.type !== 'deleteObject') return;
     
-        const { type } = confirmationProps;
+        logger.info(SOURCE, 'handleConfirmDelete [Smart Delete]: User confirmed.');
+        const { box, description, image } = confirmationAction.data;
+        setConfirmationAction(null); // Close modal immediately
         
-        // Close modal immediately
-        setConfirmationProps(null);
-    
-        if (type === 'newImage') {
-            logger.info(SOURCE, 'handleConfirm [newImage]: User confirmed. Resetting state.');
-            handleReset();
-        } else if (type === 'deleteObject') {
-            logger.info(SOURCE, 'handleConfirm [deleteObject]: User confirmed.');
-            // Use the complete, atomic snapshot from the confirmation data
-            const { box, description, image } = confirmationProps.data;
-            
-            await withLoading(async () => {
-                if (!image || !box || !description || !sessionImageDimensions) {
-                    throw new Error("Cannot delete object: required state is missing from confirmation data.");
-                }
+        await withLoading(async () => {
+            if (!image || !box || !description || !sessionImageDimensions) {
+                throw new Error("Cannot Smart Delete object: required state is missing from confirmation data.");
+            }
 
-                // Use the snapshotted 'image' for all subsequent operations
-                const currentImageDims = await imageUtils.getImageDimensions(image.url);
-                const objectImageBase64 = await imageUtils.cropImage(image.url, box);
-                
-                let fullMaskUrl: string;
-                const preciseMaskUrl = await geminiService.createPreciseMask(objectImageBase64, 'image/png', description);
-                
-                if (preciseMaskUrl) {
-                    logger.info(SOURCE, 'AI mask generation successful. Creating full size mask.');
-                    const maskAnalysis = await imageUtils.analyzeMask(preciseMaskUrl);
-                    if (maskAnalysis.isValid) {
-                        logger.info(SOURCE, `DIAGNOSTIC: Mask analysis PASSED. ${maskAnalysis.analysis}`);
-                    } else {
-                        logger.warn(SOURCE, `DIAGNOSTIC: Mask analysis FAILED. ${maskAnalysis.analysis}`);
-                    }
-                    fullMaskUrl = await imageUtils.createFullSizeMask(currentImageDims.width, currentImageDims.height, preciseMaskUrl, box);
-                } else {
-                    logger.warn(SOURCE, 'AI mask generation failed. Falling back to box mask.');
-                    fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, box);
-                }
-    
-                const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
-    
-                const inpaintedImageUrl = await geminiService.inpaintBackground(
-                    imageUtils.getBase64FromDataUrl(image.url),
-                    image.mimeType,
-                    maskBase64,
-                    sessionImageDimensions.width,
-                    sessionImageDimensions.height
-                );
-    
-                if (inpaintedImageUrl) {
-                    const newMimeType = imageUtils.getMimeTypeFromDataUrl(inpaintedImageUrl);
-                    await addHistoryState({ url: inpaintedImageUrl, mimeType: newMimeType });
-                    handleClearSelection();
-                } else {
-                    throw new Error('Inpainting failed to return an image.');
-                }
-            });
-        }
-    }, [confirmationProps, handleReset, withLoading, sessionImageDimensions, addHistoryState, handleClearSelection]);
+            const currentImageDims = await imageUtils.getImageDimensions(image.url);
+            const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, box);
+            const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
+
+            const inpaintedImageUrl = await geminiService.inpaintBackground(
+                imageUtils.getBase64FromDataUrl(image.url),
+                image.mimeType,
+                maskBase64,
+                sessionImageDimensions.width,
+                sessionImageDimensions.height,
+                description,
+            );
+
+            if (inpaintedImageUrl) {
+                const newMimeType = imageUtils.getMimeTypeFromDataUrl(inpaintedImageUrl);
+                await addHistoryState({ url: inpaintedImageUrl, mimeType: newMimeType });
+                handleClearSelection();
+            } else {
+                throw new Error('Inpainting failed to return an image.');
+            }
+        });
+    }, [confirmationAction, withLoading, sessionImageDimensions, addHistoryState, handleClearSelection]);
+
+    // New "Hard Delete" flow
+    const handleForceDelete = useCallback(async () => {
+        if (confirmationAction?.type !== 'deleteObject') return;
+
+        logger.info(SOURCE, 'handleForceDelete [Hard Delete]: User confirmed.');
+        const { box, image, description } = confirmationAction.data;
+        setConfirmationAction(null); // Close modal immediately
+
+        await withLoading(async () => {
+            if (!image || !box || !description || !sessionImageDimensions) {
+                throw new Error("Cannot Force Delete object: required state is missing from confirmation data.");
+            }
+
+            // Step 1: Client-side clear
+            logger.info(SOURCE, 'handleForceDelete: Clearing area with border color.');
+            const clearedImageUrl = await imageUtils.clearAreaWithBorderColor(image.url, box);
+            
+            // Step 2: Create mask for the cleared area
+            const currentImageDims = await imageUtils.getImageDimensions(clearedImageUrl);
+            const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, box);
+            const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
+            
+            // Step 3: Ask AI to smooth over the cleared area
+            logger.info(SOURCE, 'handleForceDelete: Asking AI to smooth over cleared area.');
+            const finalImageUrl = await geminiService.smoothClearedArea(
+                imageUtils.getBase64FromDataUrl(clearedImageUrl),
+                imageUtils.getMimeTypeFromDataUrl(clearedImageUrl),
+                maskBase64,
+                sessionImageDimensions.width,
+                sessionImageDimensions.height,
+                description
+            );
+
+            if (finalImageUrl) {
+                const newMimeType = imageUtils.getMimeTypeFromDataUrl(finalImageUrl);
+                await addHistoryState({ url: finalImageUrl, mimeType: newMimeType });
+                handleClearSelection();
+            } else {
+                throw new Error('Force Delete smoothing failed to return an image.');
+            }
+        });
+    }, [confirmationAction, withLoading, sessionImageDimensions, addHistoryState, handleClearSelection]);
     
     // --- Test Harness Integration ---
     const handleEnterTestMode = useCallback(() => {
@@ -505,7 +553,6 @@ const App: React.FC = () => {
             prompt,
             error,
             isLoading,
-            selectableObjects: [], // Reverted
         };
     });
     
@@ -571,6 +618,11 @@ const App: React.FC = () => {
         setIsSettingsModalOpen(false);
         // Optionally, show a success message
     }, []);
+    
+    // --- Expanded Edit Modal Handlers ---
+    const handleOpenExpandedEditModal = useCallback(() => setIsExpandedEditModalOpen(true), []);
+    const handleCloseExpandedEditModal = useCallback(() => setIsExpandedEditModalOpen(false), []);
+
 
     return (
         <div className="flex h-screen bg-gray-900 text-white font-sans flex-col">
@@ -592,6 +644,7 @@ const App: React.FC = () => {
                     promptMode={promptMode}
                     onSetPromptMode={handleSetPromptMode}
                     onDeleteObject={handleRequestDeleteObject}
+                    onOpenExpandedEditModal={handleOpenExpandedEditModal}
                 />
                 <div className="flex-grow flex flex-col p-8">
                     {isInEditState && (
@@ -628,13 +681,23 @@ const App: React.FC = () => {
                                     <DownloadIcon className="w-5 h-5" />
                                 </button>
                              </div>
-                             <button 
-                                onClick={handleNewImage}
-                                disabled={isLoading || isProcessingSelection || isSubEditing}
-                                className="px-3 py-1 text-sm bg-gray-600 hover:bg-gray-500 rounded-md font-semibold disabled:opacity-50 text-yellow-300"
-                            >
-                                New Image
-                            </button>
+                             <div className="flex items-center space-x-2">
+                                <button
+                                    onClick={handleRequestAddObject}
+                                    disabled={isLoading || isProcessingSelection || isSubEditing}
+                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+                                    aria-label="Add Object"
+                                >
+                                    <PlusIcon className="w-5 h-5" />
+                                </button>
+                                <button 
+                                    onClick={handleNewImage}
+                                    disabled={isLoading || isProcessingSelection || isSubEditing}
+                                    className="px-4 py-2 text-sm bg-yellow-500 text-gray-900 hover:bg-yellow-400 rounded-md font-semibold disabled:opacity-50"
+                                >
+                                    New Image
+                                </button>
+                             </div>
                         </div>
                     )}
                     <CanvasArea
@@ -643,6 +706,7 @@ const App: React.FC = () => {
                         isLoading={isLoading}
                         isProcessingSelection={isProcessingSelection}
                         selectionBox={selectionBox}
+                        editMode={editMode}
                     />
                 </div>
             </main>
@@ -656,13 +720,36 @@ const App: React.FC = () => {
                 />
             )}
 
-            {confirmationProps && (
-                 <ConfirmationModal
-                    isOpen={!!confirmationProps}
-                    message={confirmationProps.message}
-                    onConfirm={handleConfirm}
-                    onCancel={() => setConfirmationProps(null)}
-                 />
+            {confirmationAction && (
+                <>
+                    {confirmationAction.type === 'newImage' && (
+                        <ConfirmationModal
+                            isOpen={true}
+                            onConfirm={() => { setConfirmationAction(null); handleReset(); }}
+                            onCancel={() => setConfirmationAction(null)}
+                            title="Start a New Image?"
+                            confirmText="Confirm"
+                        >
+                            <p className="text-sm text-gray-400">
+                                Your current image and history will be lost. This action cannot be undone.
+                            </p>
+                        </ConfirmationModal>
+                    )}
+                    {confirmationAction.type === 'deleteObject' && (
+                        <ConfirmationModal
+                            isOpen={true}
+                            onConfirm={handleConfirmDelete}
+                            onCancel={() => setConfirmationAction(null)}
+                            title="Please confirm delete"
+                            confirmText="Delete"
+                            onForceConfirm={handleForceDelete}
+                            forceConfirmText="Force Delete"
+                            forceConfirmMessage="Some objects with unclear boundaries are hard to delete. Force delete removes everything in the selection box."
+                        >
+                            <div />
+                        </ConfirmationModal>
+                    )}
+                </>
             )}
 
             <SettingsModal 
@@ -675,6 +762,19 @@ const App: React.FC = () => {
                 isOpen={isApiInspectorOpen}
                 onClose={handleCloseApiInspector}
                 history={apiCallHistory}
+            />
+
+            <ExpandedEditModal
+                isOpen={isExpandedEditModalOpen}
+                onClose={handleCloseExpandedEditModal}
+                prompt={prompt}
+                setPrompt={setPrompt}
+                onGenerate={handleGenerate}
+                isLoading={isLoading}
+                isProcessingSelection={isProcessingSelection}
+                isRateLimited={isRateLimited}
+                promptMode={promptMode}
+                onSetPromptMode={handleSetPromptMode}
             />
 
             {isTestMode && <TestHarness onExit={handleExitTestMode} handles={testHandles} debugImageUrl={debugImageUrl} />}

@@ -9,12 +9,34 @@ This board tracks all development tasks. It serves as our single source of truth
 
 ---
 
-### In Progress (1)
-*   **[T64] (Refactor)** Make inpaintBackground prompt more robust.
+### In Progress (0)
 
 ---
 
-### Done (63)
+### Done (86)
+*   **[T86] (New Feature)** Refactor API Key Setting workflow.
+*   **[T85] (Refactor)** Enhance API Inspector to show text responses.
+*   **[T84] (Refactor)** Refactor application logging.
+*   **[T83] (UI/UX)** Correct the collapse icon to a final, intuitive `> <` chevron design.
+*   **[T82] (UI/UX)** Refine expand/collapse icons to a final, intuitive chevron design.
+*   **[T81] (UI/UX)** Refine expand/collapse icons to a more intuitive chevron design.
+*   **[T80] (UI/UX)** Refine 'Expanded Edit Modal' with a wider layout and more intuitive icons.
+*   **[T79] (New Feature)** Implement 'Expanded Edit Modal' and 'Structured Prompt Caching'.
+*   **[T78] (Refactor)** Perform final, definitive refinement of the 'Structured Edit' diff prompt.
+*   **[T77] (Refactor)** Refine the 'Structured Edit' diffing prompt to be more systemic and reliable.
+*   **[T76] (Refactor)** Perform code cleanup to remove all remnants of the reverted `TransformableObject` feature.
+*   **[T75] (Bug Fix)** Fix bug where white selection mask is rendered into the 'Add Object' result.
+*   **[T74] (Refactor)** Refine `addObjectToImage` prompt to be more robust and procedural.
+*   **[T73] (Refactor)** Remove all code references to the reverted `TransformableObject` feature.
+*   **[T72] (New Feature)** Implement the guided 'Add Object' workflow.
+*   **[T71] (UI/UX)** Move 'Add Object' button to right-hand control group in canvas header.
+*   **[T70] (UI/UX)** Add 'Add Object' button and fix 'New Image' confirmation modal.
+*   **[T69] (UI/UX)** Refine UI for New Image and Force Delete buttons.
+*   **[T68] (Bug Fix)** The 'Redo' button incorrectly performs an 'Undo' action.
+*   **[T67] (Refactor)** Implement definitive 'Describe-and-Box-Mask' architecture for reliability.
+*   **[T66] (Refactor)** Replace mask algorithm with a more robust 'Flood Fill' method.
+*   **[T65] (Refactor)** Replace API-based mask generation with a reliable client-side algorithm.
+*   **[T64] (Refactor)** Make inpaintBackground prompt more robust.
 *   **[T63] (Refactor)** Make createPreciseMask more robust with a fallback mechanism.
 *   **[T62] (Documentation)** Update design docs for API Call Inspector.
 *   **[T61] (New Feature)** Add API Call Inspector for visual debugging.

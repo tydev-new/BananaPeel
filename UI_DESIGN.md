@@ -39,7 +39,7 @@ graph TD
         PromptPanel["Prompt Panel<br/>(Contextual Prompts, Settings)"]
         subgraph "Right Pane (flex-col)"
             direction TB
-            CanvasHeader["Canvas Header<br/>(Undo, Redo, Download, New Image)"]
+            CanvasHeader["Canvas Header<br/>(Left: Undo, Redo, Download)<br/>(Right: Add Object, New Image)"]
             CanvasArea["Canvas Area<br/>(Image Display)"]
         end
     end
@@ -52,13 +52,12 @@ graph TD
 This is the primary user interaction hub. Its appearance and available actions change dynamically based on the application's state.
 
 *   **Header:** Contains the app title and a new **Settings Icon** button, which opens the API Key Settings modal.
-*   **Prompt Mode Toggle:** In the "Editing" state, a new "Freeform" / "Structured" toggle bar appears above the main text area, allowing the user to switch between editing modes.
+*   **Prompt Mode Toggle:** In the "Editing" state, a "Freeform" / "Structured" toggle bar appears above the main text area. Next to it is a new **Expand Icon** button, which opens the `ExpandedEditModal`. Both are disabled while a structured prompt is being generated.
 *   **Buttons:**
     *   In "Generation" state, the user sees "Generate Image" and "Upload an Image".
     *   In "Editing" state, the "Upload" button is hidden. The primary button becomes "Edit Image", which changes to "Apply Modification" or "Add Object" during a selection workflow.
-*   **Dynamic Prompt Height:** The prompt `textarea` is now context-aware. It has a standard height (`h-40`) by default, but shrinks to a smaller height (`h-20`) during a sub-editing workflow (`'modify'` or `'add'` mode) to create a more compact layout. In "Structured" mode, it becomes larger and vertically scrollable.
-*   **"No Object Found" Message:** In `'add'` mode, this informational message now appears *above* the prompt `textarea`, providing a more logical reading order for the user.
-*   **Scrollability:** The entire panel, from the header to the buttons at the bottom, scrolls as a single unit when content overflows. This is achieved by making the root container of the component scrollable (`overflow-y-auto`).
+*   **Dynamic Prompt Height:** The prompt `textarea` is context-aware. It has a standard height by default, but shrinks to a smaller height during a sub-editing workflow (`'modify'` or `'add'` mode).
+*   **Scrollability:** The entire panel, from the header to the buttons at the bottom, scrolls as a single unit when content overflows.
 
 #### State Diagram: Prompt Panel UI
 
@@ -74,14 +73,27 @@ stateDiagram-v2
     GenerationState --> EditingState: User generates or uploads image
 
     state "Editing State (Default)" as EditingState {
-        description Label: "Describe your edit"<br/>Toggle: "Freeform" (active)<br/>Button: "Edit Image"
+        description Label: "Describe your edit"<br/>Toggle: "Freeform" (active)<br/>Button: "Edit Image" <br/>Button: Expand Icon
     }
     EditingState --> ModifyObject: User selects an object
     EditingState --> AddObject: User selects an empty area
     EditingState --> StructuredMode: User toggles to 'Structured'
+    EditingState --> PreAdd: User clicks '+' icon in header
+    EditingState --> ExpandedEditModal: User clicks 'Expand' icon
+
+    state "Expanded Edit Modal" as ExpandedEditModal {
+        description Large Textarea <br/> Toggle: "Freeform"/"Structured" <br/> Button: "Edit Image" <br/>Button: Collapse Icon
+    }
+    ExpandedEditModal --> EditingState: User clicks "Collapse" or "Edit Image"
+
+    state "Pre-Add State" as PreAdd {
+        description Info: "Use your cursor to draw a box..."<br/>Prompt: Disabled<br/>Button: "Cancel Add"
+    }
+    PreAdd --> AddObject: User selects an area on canvas
+    PreAdd --> EditingState: User clicks "Cancel Add"
 
     state "Structured Mode" as StructuredMode {
-        description Label: "Describe your edit"<br/>Toggle: "Structured" (active)<br/>Textarea: Large, scrollable, shows detailed description<br/>Button: "Edit Image"
+        description Label: "Describe your edit"<br/>Toggle: "Structured" (active)<br/>Textarea: Shows detailed description<br/>Button: "Edit Image"
     }
     StructuredMode --> EditingState: User toggles to 'Freeform' or completes edit
 
@@ -102,122 +114,113 @@ This is the user's visual workspace. In "Editing" state, it is now preceded by a
 
 *   **Canvas Header:**
     *   **Visibility:** Only visible in "Editing" state.
-    *   **Layout:** A distinct visual "band" aligned with the canvas. Contains a left-aligned group (Undo, Redo, Download) and a right-aligned "New Image" button.
-    *   **Styling:** The "New Image" button now has yellow text (`text-yellow-300`) to match the brand's primary accent color.
-    *   **Interaction:** All buttons in this header are **disabled** whenever the user is in a sub-editing state (i.e., "Modify Object" or "Add Object"). They are only active when the user is in the default editing state with no active selection.
+    *   **Layout:** A distinct visual "band" aligned with the canvas. Contains a left-aligned group (Undo, Redo, Download) and a right-aligned group that includes the **Add Object `+` icon** and the "New Image" button.
+    *   **Interaction:** All buttons in this header are **disabled** whenever the user is in a sub-editing state (i.e., "Modify Object", "Add Object", or "Pre-Add").
 *   **Canvas Area States (`CanvasArea.tsx`):**
     *   **Welcome State:** (In "Generation" state) Displays a welcome message and instructions.
-    *   **Image Display State:** (In "Editing" state) The image is displayed. The cursor is a crosshair for selection.
+    *   **Image Display State:** (In "Editing" state) The image is displayed. The cursor is a crosshair for selection. In "Pre-Add" state, the crosshair is also active.
     *   **Selection & Loading States:** A dashed box appears on drag. After selection is complete and analyzed, a static dashed yellow box remains to show the active selection. A loading overlay appears during API calls.
 
 ### 3.3. Settings Modal (`SettingsModal.tsx`)
 
 A modal component for users to provide their own Gemini API key.
 
-*   **Activation:** Triggered when a user clicks the `SettingsIcon` in the `PromptPanel` header.
+*   **Activation:**
+    *   Triggered manually when a user clicks the `SettingsIcon` in the `PromptPanel` header.
+    *   Triggered automatically when the user attempts an API call without a key present in local storage.
 *   **UI:**
-    *   A semi-transparent overlay covers the entire application.
-    *   A centered dialog box displays the title, instructional text, and a link to `ai.google.dev` for obtaining a key.
-    *   A single `type="password"` input field is used for the key. The placeholder text indicates if a key is already saved (`••••••`) or not (`gm-...`).
-    *   "Cancel" and "Save Key" buttons are at the bottom. The "Save Key" button is disabled until the user types in the input field.
+    *   A centered dialog box.
+    *   **Title:** "Enter Your Gemini API Key".
+    *   **Content:** Provides a secure password input field and clear, step-by-step instructions on how to obtain a key, including a hyperlink to Google AI Studio.
 *   **Interaction:**
-    *   The modal closes if the user clicks "Cancel", the outside overlay, or presses the Escape key.
-    *   Clicking "Save" stores the key in `localStorage` and closes the modal. The actual key is never displayed again to the user.
+    *   "Save" stores the key in `localStorage` and closes the modal.
 
 ### 3.4. Log Viewer (`LogViewer.tsx`)
 
-This component provides a UI for power users to view and download real-time session logs. It is conditionally rendered and manages its own visibility states.
+This component provides a UI for power users to view and download real-time session logs.
 
-*   **Activation:** The viewer is visible by default when the application loads.
-*   **Exclusion:** It is hidden completely if the Test Harness is active.
-*   **Collapsed State:**
-    *   **UI:** A short, dark gray bar fixed to the bottom of the screen. Displays "Logs" text and an up-chevron.
-    *   **Interaction:** Clicking the bar expands the viewer.
-*   **Expanded State:**
-    *   **UI:** An opaque panel that expands to 40% of the screen height. Contains a header with controls and a read-only text area with the logs.
-    *   **Interaction:**
-        *   The down-chevron on the right collapses the view.
-        *   The gray **"Dismiss"** button on the left hides the viewer (including the collapsed bar) for the rest of the session.
-        *   A new blue **"API Call Inspector"** button appears next to "Dismiss", which opens the inspector modal.
-        *   The **Download** icon button (to the right of the inspector button) triggers a `.txt` file download of the logs.
+*   **Activation:** The viewer is visible by default.
+*   **Interaction:**
+    *   The bar can be expanded or collapsed.
+    *   A "Dismiss" button hides the viewer for the session.
+    *   A new "API Call Inspector" button opens the inspector modal.
+    *   A "Download" icon button triggers a `.txt` file download.
 
 ### 3.5. Confirmation Modal (`ConfirmationModal.tsx`)
 
-A reusable modal component to confirm critical user actions, replacing unreliable native browser dialogs.
+A reusable modal component to confirm critical user actions. Its design is now flexible and adapts based on the action being confirmed.
 
-*   **Activation:** Triggered when a user performs a potentially destructive action, such as clicking the "New Image" button or the "Delete Object" (trash) icon.
-*   **UI:**
-    *   A semi-transparent overlay covers the entire application, focusing the user's attention.
-    *   A centered dialog box displays a title ("Confirm Action"), a descriptive message provided by the application logic, a "Cancel" button, and a primary action "Confirm" button (styled in yellow).
-*   **Interaction:**
-    *   The modal is the only interactive element when visible.
-    *   Clicking "Confirm" executes the action and closes the modal.
-    *   Clicking "Cancel" or the overlay dismisses the modal without performing the action.
+*   **Standard Confirmation UI (for "New Image"):**
+    *   **Title:** "Start a New Image?"
+    *   **Message:** "Your current image and history will be lost. This action cannot be undone."
+    *   **Buttons:** A "Cancel" button and a "Confirm" button.
+*   **User-Choice Deletion UI (for "Delete Object"):**
+    *   **Title:** "Please confirm delete"
+    *   **Buttons:** "Cancel", "Delete" (for Smart Delete), and a separate "Force Delete" (for Hard Delete).
+    *   **Explanatory Text:** A sentence explains the difference between the two delete methods.
 
 ### 3.6. API Call Inspector Modal (`ApiCallInspectorModal.tsx`)
 
 This component provides a powerful UI for visually debugging the inputs and outputs of Gemini API calls.
 
-*   **Activation:** Triggered by the "API Call Inspector" button in the expanded `LogViewer`.
-*   **Layout:** A large modal with a two-pane view.
-    *   **Left Pane (Navigation):** Displays a list of the last 5 API calls, showing the function name and timestamp. The currently selected call is highlighted.
-    *   **Right Pane (Details):** Displays the full details for the selected call. This includes a block for the full text prompt and separate, labeled sections for "Input Images" and "Output Images".
+*   **Activation:** Triggered by the "API Call Inspector" button in the `LogViewer`.
+*   **Layout:** A large modal with a two-pane view (navigation list on the left, details on the right).
+*   **Interaction:** Users can select a call to view its full prompt and download its input/output images.
+
+### 3.7. Expanded Edit Modal (`ExpandedEditModal.tsx`)
+
+A new modal that provides a large, comfortable environment for editing long text prompts, especially for the "Structured" edit mode.
+
+*   **Activation:** Triggered by the new `ExpandIcon` in the `PromptPanel`.
+*   **Layout:** A large, responsive modal that overlays the application, taking up `90%` of the viewport width.
+    *   **Header:** Contains a "Freeform"/"Structured" toggle and a `CollapseIcon` button to close the modal.
+    *   **Main Content:** A large `textarea` that fills most of the modal.
+    *   **Footer:** A single "Edit Image" button.
 *   **Interaction:**
-    *   Clicking a call in the left pane updates the details view on the right.
-    *   Each image displayed in the details view has a "Download" button, allowing the user to save the image file for offline inspection.
-    *   The modal can be closed by clicking the "Close" button or the background overlay.
+    *   The toggle and collapse buttons are disabled while a structured prompt is being generated.
+    *   Clicking "Edit Image" performs the action and closes the modal.
 
-### 3.7. Test Harness Modal (`TestHarness.tsx`)
+### 3.8. Test Harness Modal (`TestHarness.tsx`)
 
-This component provides the UI for the developer-facing regression testing suite. It is a modal that overlays the entire application when active.
+This component provides the UI for the developer-facing regression testing suite.
 
 *   **Activation:** Triggered by typing `_run_test_` into the prompt input.
-*   **Layout:** A two-pane view.
-    *   **Left Pane:** Contains the primary controls and test case status.
-        *   **Controls:** "Run All Tests", "Copy Logs", and "Exit Test Mode" buttons.
-        *   **Test Cases:** A list of all tests from the test plan, with status icons (pending, running, passed, failed) that update in real-time.
-        *   **Log Level:** Radio buttons to filter the verbosity of logs.
-        *   **Debug Image:** A small viewer that displays the last image cropped by a `select` operation during a test run.
-    *   **Right Pane:** A monospaced, auto-scrolling log viewer that displays the detailed output from the test run. Log messages are color-coded by level (e.g., ERROR is red, WARN is yellow).
-*   **Interaction:**
-    *   The main application is disabled while the harness is active.
-    *   Clicking "Run All Tests" executes the entire test suite.
-    *   The "Exit Test Mode" button closes the modal and resets the application to its initial state.
+*   **Layout:** A two-pane view (test cases on the left, logs on the right).
 
 ## 4. Visual Style Guide
 
 *   **Color Palette:**
     *   **Background:** Dark Gray (`bg-gray-900`, `bg-gray-800`)
-    *   **Accent (Primary Action):** Yellow (`bg-yellow-500`, `border-yellow-400`, `text-yellow-300`)
-    *   **Text:** White and light grays (`text-white`, `text-gray-300`, `text-gray-400`)
-    *   **Error:** Red (`bg-red-600`)
+    *   **Accent (Primary Action):** Yellow (`bg-yellow-500`, `text-yellow-300`)
+    *   **Text:** White and light grays.
+    *   **Error / Destructive Action:** Red (`bg-red-800`)
 *   **Typography:**
-    *   **Font:** Inter. A clean, modern sans-serif font chosen for readability.
+    *   **Font:** Inter.
 *   **Iconography:**
-    *   **Style:** Outline, stroke-based icons for a lightweight and modern feel.
-    *   **Key Icons:** `Upload`, `Undo`, `Redo`, `Download`, `Settings`, `Trash`.
+    *   **Style:** Outline, stroke-based icons.
+    *   **Key Icons:** `Upload`, `Undo`, `Redo`, `Download`, `Settings`, `Trash`, `Plus`, `Expand` (chevrons pointing outward: `< >`), `Collapse` (chevrons pointing inward: `> <`).
 
 ## 5. Key Interaction Flows
 
-### 5.1. Generate New Image
-1.  User types a prompt in the text area.
-2.  The "Generate Image" button becomes active.
-3.  User clicks the button.
-4.  The `CanvasArea` shows a loading overlay. The `PromptPanel` buttons are disabled.
-5.  On success, the new image appears in the `CanvasArea`. The application transitions to the "Editing" state.
-6.  On failure, an error message appears. If the error is API key-related, it prompts the user to check the settings.
+### 5.1. Generate New Image (First Time User)
+1.  User types a prompt.
+2.  User clicks "Generate Image".
+3.  The app detects no API key and automatically opens the `SettingsModal`.
+4.  User enters their key and clicks "Save".
+5.  The modal closes, and the API call proceeds.
+6.  The app shows a loading state.
+7.  On success, the new image appears, and the app enters the "Editing" state.
 
 ### 5.2. Start New Image from Edit State
-1.  User clicks the "New Image" button in the `CanvasHeader`.
-2.  The `ConfirmationModal` appears, warning the user that their work will be lost.
-3.  If user clicks "Cancel", the modal closes and the app remains in the "Editing" state.
-4.  If user clicks "Confirm", the modal closes, the application state is completely reset, and the UI returns to the "Generation" state.
+1.  User clicks "New Image".
+2.  The `ConfirmationModal` appears.
+3.  User clicks "Confirm".
+4.  The app state is reset, and the UI returns to the "Generation" state.
 
 ### 5.3. Select and Modify Object
-1.  User drags a rectangle over an object on the canvas.
-2.  The `CanvasArea` shows a processing overlay ("Analyzing..."). The `CanvasHeader` buttons become disabled.
-3.  On success, the `PromptPanel` switches to "Modify" mode, showing the object's name. A static, dashed-yellow box is drawn on the canvas to show the selection.
-4.  User types a modification prompt (e.g., "make it blue").
-5.  User clicks "Apply Modification".
-6.  The `CanvasArea` shows a loading overlay ("Processing...").
-7.  On success, the new, modified image is displayed. The `PromptPanel` and `CanvasArea` return to the default "Editing" state, and the `CanvasHeader` buttons become enabled again.
+1.  User drags a rectangle over an object.
+2.  The app shows an "Analyzing..." overlay.
+3.  The `PromptPanel` switches to "Modify" mode.
+4.  User types a modification and clicks "Apply Modification".
+5.  The app shows a "Processing..." overlay.
+6.  On success, the new image is displayed, and the UI returns to the default "Editing" state.
