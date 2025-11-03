@@ -1,21 +1,17 @@
 import React from 'react';
 
-interface ConfirmationModalProps {
+interface ErrorModalProps {
   isOpen: boolean;
-  onConfirm: () => void;
+  errorMessage: string;
   onCancel: () => void;
-  title: string;
-  confirmText: string;
-  children: React.ReactNode;
+  onUpdateApiKey: () => void;
 }
 
-const ConfirmationModal: React.FC<ConfirmationModalProps> = ({ 
-  isOpen, 
-  onConfirm, 
-  onCancel, 
-  title,
-  confirmText,
-  children,
+const ErrorModal: React.FC<ErrorModalProps> = ({
+  isOpen,
+  errorMessage,
+  onCancel,
+  onUpdateApiKey,
 }) => {
   if (!isOpen) {
     return null;
@@ -24,20 +20,21 @@ const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   return (
     <div
       className="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50"
-      role="dialog"
+      role="alertdialog"
       aria-modal="true"
-      aria-labelledby="confirmation-title"
-      onClick={onCancel} // Allow closing by clicking overlay
+      aria-labelledby="error-title"
     >
-      <div 
-        className="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-sm border border-gray-700"
+      <div
+        className="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md border border-red-500"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 id="confirmation-title" className="text-lg font-semibold text-white mb-4">
-          {title}
+        <h2 id="error-title" className="text-lg font-semibold text-red-400 mb-4">
+          An Error Occurred
         </h2>
         
-        {children}
+        <p className="text-sm text-gray-300 bg-gray-900 p-3 rounded-md font-mono whitespace-pre-wrap">
+          {errorMessage}
+        </p>
         
         <div className="flex justify-end space-x-3 mt-6">
           <button
@@ -47,10 +44,10 @@ const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
             Cancel
           </button>
           <button
-            onClick={onConfirm}
+            onClick={onUpdateApiKey}
             className="px-4 py-2 text-sm font-semibold bg-yellow-500 text-gray-900 hover:bg-yellow-400 rounded-md transition-colors"
           >
-            {confirmText}
+            Update API Key
           </button>
         </div>
       </div>
@@ -58,4 +55,4 @@ const ConfirmationModal: React.FC<ConfirmationModalProps> = ({
   );
 };
 
-export default ConfirmationModal;
+export default ErrorModal;

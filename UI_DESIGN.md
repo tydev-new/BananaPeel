@@ -187,13 +187,25 @@ This component provides the UI for the developer-facing regression testing suite
 *   **Activation:** Triggered by typing `_run_test_` into the prompt input.
 *   **Layout:** A two-pane view (test cases on the left, logs on the right).
 
+### 3.9. Error Modal (`ErrorModal.tsx`)
+
+A new, dedicated modal for displaying API errors in a user-friendly and actionable way.
+
+*   **Activation:** Rendered whenever the main `error` state in `App.tsx` is not null. This unifies all API error handling.
+*   **UI:**
+    *   **Title:** "An Error Occurred" (in red).
+    *   **Content:** A `pre` formatted block displays the specific error message returned from the API.
+    *   **Buttons:**
+        *   "Cancel": Closes the modal and clears the error state.
+        *   "Update API Key": Closes the error modal and opens the `SettingsModal`, providing a direct path to fix authentication/billing issues.
+
 ## 4. Visual Style Guide
 
 *   **Color Palette:**
     *   **Background:** Dark Gray (`bg-gray-900`, `bg-gray-800`)
     *   **Accent (Primary Action):** Yellow (`bg-yellow-500`, `text-yellow-300`)
     *   **Text:** White and light grays.
-    *   **Error / Destructive Action:** Red (`bg-red-800`)
+    *   **Error / Destructive Action:** Red (`bg-red-800`, `text-red-400`)
 *   **Typography:**
     *   **Font:** Inter.
 *   **Iconography:**
@@ -205,11 +217,12 @@ This component provides the UI for the developer-facing regression testing suite
 ### 5.1. Generate New Image (First Time User)
 1.  User types a prompt.
 2.  User clicks "Generate Image".
-3.  The app detects no API key and automatically opens the `SettingsModal`.
-4.  User enters their key and clicks "Save".
-5.  The modal closes, and the API call proceeds.
-6.  The app shows a loading state.
-7.  On success, the new image appears, and the app enters the "Editing" state.
+3.  The API call fails due to a missing key.
+4.  The `ErrorModal` appears, showing "API key not found...".
+5.  User clicks "Update API Key".
+6.  The `ErrorModal` closes, and the `SettingsModal` opens.
+7.  User enters their key and clicks "Save".
+8.  The `SettingsModal` closes, and the user can now successfully generate an image.
 
 ### 5.2. Start New Image from Edit State
 1.  User clicks "New Image".

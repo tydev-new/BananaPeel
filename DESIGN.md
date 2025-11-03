@@ -1,7 +1,7 @@
 # Engineering Design Document: Banana Peel
 
-**Version:** 1.1
-**Date:** 2023-11-19
+**Version:** 1.2
+**Date:** 2023-12-08
 **Author:** World-Class Senior Frontend Engineer
 
 ## 1. Overview
@@ -26,6 +26,7 @@ graph TD
         UI_User -- Enters key --> SettingsModal;
         UI_User -- Confirms --> ConfirmationModal;
         PromptPanel -- Opens --> ExpandedEditModal;
+        App -- Shows Error --> ErrorModal;
         
         subgraph "Editing State UI"
             direction TB
@@ -39,14 +40,14 @@ graph TD
     end
 
     subgraph "Application Core (Controller/State)"
-        App[App.tsx<br/><i>Central State & Logic</i>];
+        App[App.tsx<br/><i>Central State & Logic<br/>(Incl. Session API Key)</i>];
     end
 
     subgraph "Services (Model/Logic)"
         GeminiService[geminiService.ts<br/><i>Gemini API Abstraction</i>];
         ImageUtils[imageUtils.ts<br/><i>Image Processing Utilities</i>];
         LoggerService[logger.ts<br/><i>Logging Service</i>];
-        ApiKeyStore[apiKeyStore.ts<br/><i>LocalStorage Wrapper</i>];
+        UsageTracker[usageTracker.ts<br/><i>Persistent Usage Counter</i>];
         ApiHistory[apiCallHistory.ts<br/><i>API 'Flight Recorder'</i>]
         GeminiAPI[Google Gemini API<br/><i>External Service</i>];
     end
@@ -66,21 +67,25 @@ graph TD
     App -- Renders & Controls --> ConfirmationModal;
     App -- Renders & Controls --> ApiInspectorModal;
     App -- Renders & Controls --> ExpandedEditModal;
+    App -- Renders & Controls --> ErrorModal;
     App -- Calls --> GeminiService;
     App -- Calls --> ImageUtils;
     App -- Configures --> LoggerService;
+    App -- Reads from --> UsageTracker;
     LoggerService -- Pushes Logs --> App;
     ApiHistory -- Pushes History --> App;
 
     GeminiService -- Records to --> ApiHistory;
-    GeminiService -- Reads from --> ApiKeyStore;
+    GeminiService -- Updates --> UsageTracker;
     GeminiService -- HTTP Requests --> GeminiAPI;
-    SettingsModal -- Saves to --> ApiKeyStore;
+    SettingsModal -- Saves to --> App;
+    ErrorModal -- Triggers --> SettingsModal;
 
     style App fill:#f9f,stroke:#333,stroke-width:2px
     style GeminiService fill:#bbf,stroke:#333,stroke-width:2px
     style ImageUtils fill:#bbf,stroke:#333,stroke-width:2px
     style LoggerService fill:#bbf,stroke:#333,stroke-width:2px
+    style UsageTracker fill:#bbf,stroke:#333,stroke-width:2px
     style ApiHistory fill:#bbf,stroke:#333,stroke-width:2px
 ```
 
@@ -88,33 +93,54 @@ graph TD
 
 This section details the core logic, services, and API interactions that power the application's features.
 
-### 3.1. Gemini Service (`geminiService.ts`)
+### 3.1. API Key & Usage Management
 
-This module is the abstraction layer for all communication with the Google Gemini API.
+This system is designed to provide a seamless experience for new users while guiding them to use their own API key for extended use.
 
-#### 3.1.1. `describeObject`
+*   **API Key Management:**
+    *   **Decision:** User-provided API keys are **session-only**. They are stored in the `App.tsx` component's state and are **not** persisted in `localStorage`.
+    *   **Rationale:** This is a more secure and user-friendly approach. It prevents sensitive keys from being stored long-term in the browser and ensures a clean state on each new visit.
+*   **Default Key Rate Limiting:**
+    *   **Mechanism:** A persistent counter is managed by `utils/usageTracker.ts`, which uses `localStorage`. This counter tracks the number of API calls made using the application's default (fallback) key.
+    *   **Limit:** The limit is set to 6 free uses.
+    *   **Enforcement:** The `callApiWithRetry` utility in `geminiService.ts` is the central enforcement point. Before any call, it checks if the default key is being used and if the count has been exceeded.
+    *   **User Flow:** If the limit is reached, or if the default key hits a remote quota/billing error, a specific, user-friendly error is thrown. This error is caught by the UI and displayed in the `ErrorModal`, which guides the user to the `SettingsModal` to enter their own key.
+
+### 3.2. Gemini Service (`geminiService.ts`)
+
+This module is the abstraction layer for all communication with the Google Gemini API. All exported functions now require an `apiKey` and `keyType` to be passed in, making the service stateless and dependent on the `App` component for key management.
+
+#### 3.2.1. `describeObject`
 *   **Purpose:** To identify the main object within a cropped image.
 *   **Prompt Engineering:** The prompt is designed for brevity and to cleanly differentiate between an object and "background".
 
-#### 3.1.2. `inpaintBackground` ("Smart Delete")
-*   **Purpose:** To intelligently remove an object and realistically fill in the background.
-*   **Architecture:** Uses the robust "Describe-and-Box-Mask" architecture, providing the AI with the image, a box mask for location, and a text description for semantic context.
-*   **Prompt Engineering:** The prompt is highly explicit, containing conditional logic to fall back to a "remove all content" instruction if the described object isn't found.
+#### 3.2.2. Object Deletion Workflow
+*   **Purpose:** To intelligently remove a selected object and realistically fill in the background.
+*   **Architecture:** This is a robust, multi-step workflow that combines AI generation with deterministic client-side processing for maximum reliability.
+    *   **Step 1: `createPreciseMask` (AI):** The cropped image of the object is sent to the AI with a prompt to generate a high-fidelity, black-and-white silhouette mask. The prompt uses an "expert graphic artist" persona for high quality.
+    *   **Step 2: Client-Side Cleaning (`binarizeMask`):** The generated mask is programmatically cleaned to be purely black and white, removing any gray pixels or anti-aliasing.
+    *   **Step 3: Client-Side Validation (`analyzeMask`):** The cleaned mask is analyzed. If it's found to be invalid (e.g., all black), the system gracefully falls back to using a simple, reliable rectangular mask (`createMaskFromBox`).
+    *   **Step 4: Client-Side Scaling & Compositing (`scaleImage`, `compositeMask`):** The valid mask is programmatically scaled to the exact dimensions of the user's selection box, then composited onto a full-size black canvas to create the final "global mask".
+    *   **Step 5: `inpaintBackground` (AI):** The original image and the final global mask are sent to the AI. The prompt is highly explicit, defining the inputs and using a strong negative constraint (e.g., "The filled-in area MUST NOT contain a red square") to ensure the object is not re-generated.
 
-#### 3.1.3. `addObjectToImage`
+#### 3.2.3. `addObjectToImage`
 *   **Purpose:** To add a new object into a specified rectangular area.
 *   **Architecture:** Uses a reliable client-generated box mask to define location and size.
 *   **Prompt Engineering:** The prompt is procedural and includes a `CRITICAL INSTRUCTION` to prevent the AI from rendering the mask in the final image.
 
-#### 3.1.4. `addModifiedObject`
-*   **Purpose:** The second stage of the object modification workflow, placing a modified object onto a clean background.
-*   **Architecture:** A complex multi-modal prompt providing the AI with the background, mask, a reference image of the original object, and structured user instructions.
+#### 3.2.4. Object Modification Workflow ("Smart Pre-processor" Architecture)
+*   **Purpose:** To modify a selected object based on a user's natural language command.
+*   **Architecture:** This workflow was refactored into a more robust, two-step "Smart Pre-processor / Dumb Executor" architecture. This separates the complex task of language interpretation from the task of image manipulation, significantly improving reliability.
+    *   **Step 1: `preprocessUserPrompt` (The "Smart" Step):**
+        *   The user's raw, natural-language prompt is sent to a text-only Gemini model.
+        *   The prompt for this step is highly engineered to act as an **expert instruction interpreter**. It explicitly tells the model to resolve all ambiguities and relative terms (e.g., "make it bigger", "move it left") in the context of the original object's mask.
+        *   It outputs a structured, unambiguous JSON object with precise instructions (e.g., `{"scale": "make it bigger than mask scale"}`).
+    *   **Step 2: `addModifiedObject` (The "Dumb" Executor):**
+        *   This multi-modal function receives the background, mask, reference object, and the **pre-processed JSON** from Step 1.
+        *   Its prompt is now dramatically simplified. It is a direct, procedural instruction that tells the model to execute the precise content, location, scale, and rotation commands from the JSON, with no room for interpretation.
+*   **Rationale:** This separation of concerns is a key architectural decision. By letting a text model handle the nuanced language interpretation and the image model handle the direct visual execution, each model operates in its area of strength. This trades a small amount of latency (for the extra API call) for a massive gain in reliability and predictability.
 
-#### 3.1.5. `smoothClearedArea` ("Hard Delete" - AI Step)
-*   **Purpose:** The final, AI-powered step of the "Hard Delete" workflow, performing a content-aware fill on a pre-cleared area.
-*   **Prompt Engineering:** The prompt is maximally robust, using a "few-shot" technique with concrete examples (e.g., "if on a table that had a fruit bowl, fill with the table texture, not more fruit") and a strong negative constraint to prevent the AI from regenerating the deleted object.
-
-### 3.2. Structured Edit Workflow
+### 3.3. Structured Edit Workflow
 
 This is a powerful editing feature that relies on a multi-step AI process.
 
@@ -143,30 +169,14 @@ sequenceDiagram
 #### **Structured Prompt Caching**
 To improve performance, the result of `describeImageInDetail` is cached. The generated description is stored directly on the `history` state object corresponding to the image. When the user toggles to "Structured" mode, the application first checks for this cached value. If found, it's used instantly, avoiding a redundant API call. The cache is naturally invalidated when the user Undo/Redo's to a different image, as the application will then check the history entry for that specific image.
 
-### 3.3. Image Utilities (`imageUtils.ts`)
+### 3.4. Image Utilities (`imageUtils.ts`)
 
 This module contains client-side helper functions for image manipulation.
-*   `createMaskFromBox`: A simple, 100% reliable function that generates a rectangular mask from a bounding box.
-*   `clearAreaWithBorderColor`: A client-side function for the "Hard Delete" workflow that fills an area with the average color of its border.
-
-### 3.4. User-Choice Deletion Workflow
-
-The application provides two distinct paths for object deletion, controlled by the user via the `ConfirmationModal`.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant App
-    participant geminiService
-
-    User->>App: Clicks Trash, then chooses "Smart Delete"
-    App->>geminiService: inpaintBackground(image, boxMask, description)
-    geminiService-->>App: returns finalImage
-    
-    User->>App: Clicks Trash, then chooses "Hard Delete"
-    App->>geminiService: smoothClearedArea(clearedImage, boxMask, description)
-    geminiService-->>App: returns finalImage
-```
+*   `createMaskFromBox`: A simple, 100% reliable function that generates a rectangular mask from a bounding box. Used as a fallback.
+*   `binarizeMask`: Cleans an AI-generated mask to be purely black-and-white.
+*   `scaleImage`: Programmatically resizes a mask to match the user's selection dimensions.
+*   `compositeMask`: Assembles the final global mask by placing the scaled object mask onto a full-size canvas.
+*   `analyzeMask`: A diagnostic utility to validate the integrity of an AI-generated mask.
 
 ### 3.5. Guided "Add Object" Workflow
 
@@ -187,25 +197,31 @@ sequenceDiagram
     App->>PromptPanel: Show "Describe object to add..." UI
 ```
 
-### 3.6. Proactive API Key Workflow
+### 3.6. Proactive API Error Workflow
 
-This workflow ensures a smooth onboarding experience for new users by guiding them to enter their mandatory API key.
+This workflow ensures a smooth user experience when API calls fail by providing a unified, actionable error modal.
 
 ```mermaid
 sequenceDiagram
     participant User
     participant App
     participant geminiService
+    participant ErrorModal
     participant SettingsModal
 
-    User->>App: Clicks "Generate" for the first time
+    User->>App: Clicks "Generate"
     App->>geminiService: generateImage(prompt)
-    geminiService->>geminiService: Fails to find key in localStorage
-    geminiService-->>App: Throws "API key not found" Error
+    geminiService->>geminiService: API call fails (e.g., invalid key, quota exceeded)
+    geminiService-->>App: Throws Error
     
-    App->>App: Catches specific error
-    App->>SettingsModal: setModalOpen(true)
-    SettingsModal-->>User: Renders "Enter Your Gemini API Key" modal
+    App->>App: Catches error, sets error state
+    App->>ErrorModal: Renders with error message
+    ErrorModal-->>User: Displays error and action buttons
+    
+    User->>ErrorModal: Clicks "Update API Key"
+    ErrorModal->>App: Triggers handler
+    App->>ErrorModal: Hides ErrorModal
+    App->>SettingsModal: Opens SettingsModal
 ```
 
 ## 4. State Management
@@ -222,10 +238,10 @@ This section documents key architectural decisions.
 *   **Decision:** All editing API calls are constrained by a single set of dimensions (`sessionImageDimensions`).
 *   **Rationale:** To prevent "generative drift" in the AI's output dimensions.
 
-### 5.2. Mandatory, On-Demand API Client (`getGenAIClient`)
-*   **Decision:** The application now requires a user-provided API key. The Gemini API client is created just-in-time for each API call, and the service layer throws a specific error if no key is present.
-*   **Rationale:** This makes the key requirement explicit and robust. The error-handling mechanism allows the UI layer to react gracefully (by opening the settings modal) without tightly coupling the service and UI components.
+### 5.2. Mandatory, On-Demand API Client
+*   **Decision:** The Gemini API client is created just-in-time for each API call, using either the user-provided session key or the default app key.
+*   **Rationale:** This makes key management flexible and stateless at the service layer. The UI layer (`App.tsx`) is responsible for deciding which key to use, promoting a clear separation of concerns.
 
-### 5.3. Abandoning Complex Mask Generation for "Describe-and-Box-Mask"
-*   **Decision:** All complex mask generation has been removed in favor of a simple, client-generated rectangular mask paired with a text description of the object.
-*   **Rationale:** The mask generation step was the most unreliable part of the workflow. This architecture makes mask generation 100% reliable and leverages the AI for contextual understanding, which it excels at.
+### 5.3. Abandoning Complex Mask Generation for a Multi-Step Workflow
+*   **Decision:** The initial approach of a single, complex mask generation API call was abandoned in favor of a more robust, multi-step process that combines a simpler AI mask generation with deterministic client-side validation, cleaning, and fallback logic.
+*   **Rationale:** A single AI call for mask generation proved to be a non-deterministic point of failure. The new multi-step architecture is significantly more resilient. It leverages the AI for what it's good at (generating a silhouette) but uses reliable client-side code to handle critical tasks like cleaning, scaling, and validation, including a guaranteed-to-work fallback to a simple box mask. This makes the entire deletion and modification workflow faster and more reliable.

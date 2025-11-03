@@ -4,16 +4,25 @@ This board tracks all development tasks. It serves as our single source of truth
 
 ---
 
-### Backlog (1)
+### Backlog (0)
+
+
+---
+
+### In Progress (1)
+*   **[T94] (Documentation)** Enhance README.md with Features and Setup Guide.
+
+---
+
+### Done (93)
+*   **[T93] (Documentation)** Overhaul README.md with project rationale and architecture.
 *   **[T51] (New Feature)** Implement usage-based rate limiting for the default API key.
-
----
-
-### In Progress (0)
-
----
-
-### Done (86)
+*   **[T92] (New Feature)** When a Gemini API call receives an error, display the error on a modal dialog box with actionable buttons.
+*   **[T91] (Bug Fix)** The `createPreciseMask` prompt is not robust enough, sometimes returning the original image instead of a mask, which causes object regeneration.
+*   **[T90] (Bug Fix)** Deleted object is sometimes regenerated, possibly due to an imperfect mask.
+*   **[T89] (Bug Fix)** Structurally refactor Undo/Redo logic to prevent regressions.
+*   **[T88] (Refactor)** Refactor 'modify object' workflow with a 'Smart Pre-processor' architecture.
+*   **[T87] (Refactor)** Overhaul object deletion to a robust, multi-step precise mask/inpaint workflow.
 *   **[T86] (New Feature)** Refactor API Key Setting workflow.
 *   **[T85] (Refactor)** Enhance API Inspector to show text responses.
 *   **[T84] (Refactor)** Refactor application logging.
@@ -94,6 +103,6 @@ This board tracks all development tasks. It serves as our single source of truth
 *   **[T6] (Documentation)** Create a formal regression test plan (`REGRESSION_TEST_PLAN.md`).
 *   **[T5] (Documentation)** Refactor `DESIGN.md` to link to `PRODUCT.md` as the SSOT.
 *   **[T4] (Documentation)** Create a Product Requirements Document (`PRODUCT.md`).
-*   **[T3] (Process Improvement)** Create a persistent `CHANGELOG.md` for all development sessions.
+*   **[T3] (Process Improvement)** Create a persistent `CHANGLelog.md` for all development sessions.
 *   **[T2] (Process Improvement)** Add a rule to `system_prompt.md` to enforce adherence to `DESIGN.md`.
 *   **[T1] (Documentation)** Create the initial Engineering Design Document (`DESIGN.md`).

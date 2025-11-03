@@ -7,16 +7,16 @@ import ConfirmationModal from './components/ConfirmationModal';
 import SettingsModal from './components/SettingsModal';
 import ApiCallInspectorModal from './components/ApiCallInspectorModal';
 import ExpandedEditModal from './components/ExpandedEditModal';
+import ErrorModal from './components/ErrorModal';
 import { BoundingBox, ApiCallRecord, EditMode, PromptMode, HistoryState } from './types';
 import * as geminiService from './services/geminiService';
 import * as imageUtils from './utils/imageUtils';
-import * as apiKeyStore from './utils/apiKeyStore';
+import * as usageTracker from './utils/usageTracker';
 import * as apiCallHistoryStore from './utils/apiCallHistory';
 import { AppState, AppTestHandles } from './test/types';
 import { logger, LogLevel } from './utils/logger';
 import { DownloadIcon, PlusIcon, RedoIcon, UndoIcon } from './components/icons';
 
-// This defines a complete, atomic snapshot of the data needed to delete an object.
 type DeleteActionData = {
     box: BoundingBox;
     description: string;
@@ -50,6 +50,10 @@ const App: React.FC = () => {
     const [confirmationAction, setConfirmationAction] = useState<ConfirmationAction | null>(null);
     const [isExpandedEditModalOpen, setIsExpandedEditModalOpen] = useState(false);
 
+    // API Key & Usage State
+    const [sessionApiKey, setSessionApiKey] = useState<string | null>(null);
+    const [usageCount, setUsageCount] = useState<number>(0);
+
     // Selection/Editing state
     const [selectionBox, setSelectionBox] = useState<BoundingBox | null>(null);
     const [editMode, setEditMode] = useState<EditMode>(null);
@@ -76,7 +80,7 @@ const App: React.FC = () => {
     // Ref to hold latest handlers to avoid stale closures
     const handlersRef = useRef<AppHandlers>(null!);
 
-
+    // --- Derived State ---
     const currentImage = useMemo(() => {
         if (historyIndex >= 0 && historyIndex < history.length) {
             return history[historyIndex];
@@ -90,7 +94,18 @@ const App: React.FC = () => {
     const canUndo = useMemo(() => historyIndex > 0, [historyIndex]);
     const canRedo = useMemo(() => historyIndex < history.length - 1, [historyIndex, history]);
 
-    // --- Session & Test Logging Setup ---
+    // Fix: Add an explicit return type to `getApiKeyInfo`.
+    // This prevents TypeScript from widening the literal type of `type` to a generic `string`.
+    // By specifying the return type, we ensure `apiKeyInfo.type` is correctly typed as `'user' | 'default'`,
+    // which matches the `ApiKeyType` expected by the `geminiService` functions.
+    const getApiKeyInfo = useCallback((): { key: string; type: 'user' | 'default' } => {
+        const key = sessionApiKey || process.env.API_KEY || '';
+        const type = sessionApiKey ? 'user' : 'default';
+        return { key, type };
+    }, [sessionApiKey]);
+
+
+    // --- Effects ---
     useEffect(() => {
         logger.setLevel(LogLevel.INFO);
         const logCollector = (message: string) => {
@@ -98,17 +113,17 @@ const App: React.FC = () => {
         };
         logger.addOutput(logCollector);
 
-        // Subscribe to API call history updates
+        // Load initial usage count from persistent storage
+        setUsageCount(usageTracker.getUsageCount());
+
         const unsubscribe = apiCallHistoryStore.subscribe(setApiCallHistory);
 
-        // Cleanup on unmount
         return () => {
             logger.removeOutput(logCollector);
             unsubscribe();
         };
     }, []);
 
-    // Effect to reset prompt mode on undo/redo
     useEffect(() => {
         if (historyIndex !== -1) {
             logger.info(SOURCE, `useEffect[historyIndex]: History changed to index ${historyIndex}. Resetting prompt mode and clearing prompt.`);
@@ -117,6 +132,12 @@ const App: React.FC = () => {
             setOriginalStructuredPrompt(null);
         }
     }, [historyIndex]);
+    
+    const updateUsageCountIfNeeded = useCallback(() => {
+        if (getApiKeyInfo().type === 'default') {
+            setUsageCount(usageTracker.getUsageCount());
+        }
+    }, [getApiKeyInfo]);
 
     // --- History Management ---
     const addHistoryState = useCallback(async (newImage: { url: string; mimeType: string }) => {
@@ -135,23 +156,18 @@ const App: React.FC = () => {
         }
     }, [history, historyIndex]);
 
-    const handleUndo = useCallback(() => {
-        if (canUndo) {
-            logger.info(SOURCE, `handleUndo: Called. Index from ${historyIndex} to ${historyIndex - 1}.`);
-            setHistoryIndex(prev => prev - 1);
-        } else {
-            logger.warn(SOURCE, 'handleUndo: Called but cannot undo.');
+    const handleHistoryNavigation = useCallback((direction: 'undo' | 'redo') => {
+        const canNavigate = direction === 'undo' ? canUndo : canRedo;
+        if (!canNavigate) {
+            logger.warn(SOURCE, `handleHistoryNavigation: Cannot perform ${direction}.`);
+            return;
         }
-    }, [canUndo, historyIndex]);
 
-    const handleRedo = useCallback(() => {
-        if (canRedo) {
-            logger.info(SOURCE, `handleRedo: Called. Index from ${historyIndex} to ${historyIndex + 1}.`);
-            setHistoryIndex(prev => prev - 1);
-        } else {
-            logger.warn(SOURCE, 'handleRedo: Called but cannot redo.');
-        }
-    }, [canRedo, historyIndex]);
+        const change = direction === 'undo' ? -1 : 1;
+        const newIndex = historyIndex + change;
+        logger.info(SOURCE, `handleHistoryNavigation: Called. Direction: ${direction}. Index from ${historyIndex} to ${newIndex}.`);
+        setHistoryIndex(newIndex);
+    }, [canUndo, canRedo, historyIndex]);
 
     const handleReset = useCallback(() => {
         logger.info(SOURCE, 'handleReset: Called. Resetting all application state.');
@@ -176,608 +192,517 @@ const App: React.FC = () => {
     }, []);
     
 
-    // --- Core Action Handlers ---
-    const withLoading = useCallback(async <T,>(action: () => Promise<T>, type: 'loading' | 'processing' = 'loading'): Promise<T | undefined> => {
-        logger.info(SOURCE, `withLoading: Setting loading state to true (type: ${type}).`);
+    // --- Core Image Operations ---
+
+    const handleGenerate = async () => {
+        if (!prompt || isLoading || isProcessingSelection) return;
+
+        setIsLoading(true);
         setError(null);
-        if (type === 'processing') setIsProcessingSelection(true);
-        else setIsLoading(true);
-        
+        const apiKeyInfo = getApiKeyInfo();
+
         try {
-            const result = await action();
-            return result;
-        } catch (error: any) {
-            let errorMessage = 'An unknown error occurred.';
-            if (error && typeof error === 'object' && 'message' in error) {
-                const nestedMessage = (error as any).message;
-                if (typeof nestedMessage === 'string') {
-                    if (nestedMessage.toLowerCase().includes('responsible ai')) {
-                        errorMessage = "The prompt was blocked for safety reasons. Please try a different prompt.";
-                    } else if (nestedMessage.toLowerCase().includes('api key not valid')) {
-                        errorMessage = "Your API key is not valid. Please check it in Settings.";
-                    } else if (nestedMessage.toLowerCase().includes('api key not found')) {
-                        errorMessage = "API key not found. Please add it in Settings.";
-                        setIsSettingsModalOpen(true);
-                    }
-                    else {
-                        errorMessage = nestedMessage;
-                    }
-                }
-            } else if (typeof error === 'string') {
-                errorMessage = error;
-            }
-            logger.error(SOURCE, `withLoading: Caught error: ${errorMessage}`);
-            setError(errorMessage);
-        } finally {
-            logger.info(SOURCE, 'withLoading: Setting loading state to false.');
-            if (type === 'processing') setIsProcessingSelection(false);
-            else setIsLoading(false);
-        }
-        return undefined;
-    }, []);
-    
+            if (editMode === 'modify' && selectionBox && currentImage && sessionImageDimensions && originalObjectDescription) {
+                 logger.info(SOURCE, `USER_INTENT [Modify Object]: "${prompt}"`);
+                 const originalImageBase64 = imageUtils.getBase64FromDataUrl(currentImage.url);
 
-    const handleGenerate = useCallback(async () => {
-        logger.info(SOURCE, 'handleGenerate: Called.');
+                 const boxMask = await imageUtils.createMaskFromBox(sessionImageDimensions.width, sessionImageDimensions.height, selectionBox);
+                 const boxMaskBase64 = imageUtils.getBase64FromDataUrl(boxMask);
 
-        // --- USER INTENT LOGGING ---
-        if (promptMode === 'structured') {
-            logger.info(SOURCE, `USER_INTENT [structured edit]: Applying changes from structured description.`);
-        } else if (editMode === 'modify') {
-            logger.info(SOURCE, `USER_INTENT [modify]: "${prompt}"`);
-        } else if (editMode === 'add') {
-            logger.info(SOURCE, `USER_INTENT [add]: "${prompt}"`);
-        } else if (isInEditState) {
-            logger.info(SOURCE, `USER_INTENT [global edit]: "${prompt}"`);
-        } else {
-            logger.info(SOURCE, `USER_INTENT [generate]: "${prompt}"`);
-        }
-        // --- END LOGGING ---
+                 const inpaintedDataUrl = await geminiService.inpaintBackground(
+                     apiKeyInfo.key, apiKeyInfo.type, originalImageBase64, currentImage.mimeType, boxMaskBase64,
+                     sessionImageDimensions.width, sessionImageDimensions.height, originalObjectDescription
+                 );
+                 const inpaintedBase64 = imageUtils.getBase64FromDataUrl(inpaintedDataUrl);
+                 const inpaintedMimeType = imageUtils.getMimeTypeFromDataUrl(inpaintedDataUrl);
 
-        await withLoading(async () => {
-            let newImageUrl: string | undefined;
+                 const croppedObjectBase64 = await imageUtils.cropImage(currentImage.url, selectionBox);
+                 const preprocessed = await geminiService.preprocessUserPrompt(apiKeyInfo.key, apiKeyInfo.type, prompt);
 
-            if (promptMode === 'structured') {
-                logger.info(SOURCE, `handleGenerate: In 'structured' edit mode.`);
-                if (!currentImage || !sessionImageDimensions || !originalStructuredPrompt) {
-                    throw new Error("Cannot perform structured edit without current image, dimensions, and original prompt.");
-                }
-                newImageUrl = await geminiService.editImageWithStructuredPrompt(
-                    originalStructuredPrompt,
-                    prompt,
-                    imageUtils.getBase64FromDataUrl(currentImage.url),
-                    currentImage.mimeType,
-                    sessionImageDimensions.width,
-                    sessionImageDimensions.height
+                 const finalDataUrl = await geminiService.addModifiedObject(
+                     apiKeyInfo.key, apiKeyInfo.type, inpaintedBase64, inpaintedMimeType, croppedObjectBase64,
+                     boxMaskBase64, preprocessed, sessionImageDimensions.width, sessionImageDimensions.height
+                 );
+                 await addHistoryState({ url: finalDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(finalDataUrl) });
+
+            } else if (editMode === 'add' && selectionBox && currentImage && sessionImageDimensions) {
+                logger.info(SOURCE, `USER_INTENT [Add Object]: "${prompt}"`);
+                const imageBase64 = imageUtils.getBase64FromDataUrl(currentImage.url);
+                const mask = await imageUtils.createMaskFromBox(sessionImageDimensions.width, sessionImageDimensions.height, selectionBox);
+                const maskBase64 = imageUtils.getBase64FromDataUrl(mask);
+                const newDataUrl = await geminiService.addObjectToImage(
+                    apiKeyInfo.key, apiKeyInfo.type, imageBase64, currentImage.mimeType, maskBase64,
+                    prompt, sessionImageDimensions.width, sessionImageDimensions.height
                 );
-
-            } else if ((editMode === 'modify' || editMode === 'add') && selectionBox) {
-                logger.info(SOURCE, `handleGenerate: In edit mode '${editMode}'.`);
-                if (!currentImage || !sessionImageDimensions) {
-                    throw new Error("Cannot edit without a current image and session dimensions.");
-                }
-
-                const currentImageDims = await imageUtils.getImageDimensions(currentImage.url);
-
-                if (editMode === 'modify' && originalObjectDescription) {
-                    logger.info(SOURCE, 'handleGenerate: Modifying existing object.');
-                    const preprocessed = await geminiService.preprocessUserPrompt(prompt);
-                    const objectImageBase64 = await imageUtils.cropImage(currentImage.url, selectionBox);
-                    
-                    const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, selectionBox);
-                    const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
-                    
-                    const inpaintedImageUrl = await geminiService.inpaintBackground(
-                        imageUtils.getBase64FromDataUrl(currentImage.url),
-                        currentImage.mimeType,
-                        maskBase64,
-                        sessionImageDimensions.width,
-                        sessionImageDimensions.height,
-                        originalObjectDescription
-                    );
-
-                    newImageUrl = await geminiService.addModifiedObject(
-                        imageUtils.getBase64FromDataUrl(inpaintedImageUrl),
-                        imageUtils.getMimeTypeFromDataUrl(inpaintedImageUrl),
-                        objectImageBase64,
-                        maskBase64,
-                        preprocessed,
-                        sessionImageDimensions.width,
-                        sessionImageDimensions.height
-                    );
-                } else { // 'add' mode
-                    logger.info(SOURCE, 'handleGenerate: Adding new object to selection.');
-                    const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, selectionBox);
-                    const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
-                    
-                    newImageUrl = await geminiService.addObjectToImage(
-                        imageUtils.getBase64FromDataUrl(currentImage.url),
-                        currentImage.mimeType,
-                        maskBase64,
-                        prompt,
-                        sessionImageDimensions.width,
-                        sessionImageDimensions.height
-                    );
-                }
+                await addHistoryState({ url: newDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(newDataUrl) });
 
             } else if (isInEditState && currentImage && sessionImageDimensions) {
-                logger.info(SOURCE, 'handleGenerate: Performing global edit on current image.');
-                newImageUrl = await geminiService.editImage(
-                    prompt,
-                    imageUtils.getBase64FromDataUrl(currentImage.url),
-                    currentImage.mimeType,
-                    sessionImageDimensions.width,
-                    sessionImageDimensions.height
-                );
+                if (promptMode === 'structured' && originalStructuredPrompt) {
+                     logger.info(SOURCE, `USER_INTENT [Structured Edit]: ${prompt}`);
+                     const imageBase64 = imageUtils.getBase64FromDataUrl(currentImage.url);
+                     const newDataUrl = await geminiService.editImageWithStructuredPrompt(
+                         apiKeyInfo.key, apiKeyInfo.type, originalStructuredPrompt, prompt, imageBase64,
+                         currentImage.mimeType, sessionImageDimensions.width, sessionImageDimensions.height
+                     );
+                     await addHistoryState({ url: newDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(newDataUrl) });
+                } else {
+                    logger.info(SOURCE, `USER_INTENT [Global Edit]: "${prompt}"`);
+                    const imageBase64 = imageUtils.getBase64FromDataUrl(currentImage.url);
+                    const newDataUrl = await geminiService.editImage(
+                        apiKeyInfo.key, apiKeyInfo.type, prompt, imageBase64, currentImage.mimeType,
+                        sessionImageDimensions.width, sessionImageDimensions.height
+                    );
+                    await addHistoryState({ url: newDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(newDataUrl) });
+                }
             } else {
-                logger.info(SOURCE, 'handleGenerate: Generating new image from prompt.');
-                newImageUrl = await geminiService.generateImage(prompt);
+                logger.info(SOURCE, `USER_INTENT [New Image]: "${prompt}"`);
+                const newDataUrl = await geminiService.generateImage(apiKeyInfo.key, apiKeyInfo.type, prompt);
+                await addHistoryState({ url: newDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(newDataUrl) });
             }
+            updateUsageCountIfNeeded();
+        } catch (e) {
+            const error = e as Error;
+            logger.error(SOURCE, `handleGenerate: An error occurred: ${error.message}`);
+            setError(error.message);
+        } finally {
+            setIsLoading(false);
+            setPrompt('');
+            setSelectionBox(null);
+            setEditMode(null);
+            setOriginalObjectDescription(null);
+            setPromptMode('freeform');
+            setOriginalStructuredPrompt(null);
+        }
+    };
 
-            if (newImageUrl) {
-                const newMimeType = imageUtils.getMimeTypeFromDataUrl(newImageUrl);
-                await addHistoryState({ url: newImageUrl, mimeType: newMimeType });
-                handleClearSelection();
-            } else {
-                 throw new Error('Image generation failed to return an image.');
-            }
-        });
-    }, [prompt, currentImage, selectionBox, editMode, originalObjectDescription, addHistoryState, withLoading, sessionImageDimensions, isInEditState, promptMode, originalStructuredPrompt]);
-
-
-    const handleUpload = useCallback(async (file: File) => {
-        logger.info(SOURCE, `handleUpload: Called with file: ${file.name}`);
-        await withLoading(async () => {
+    const handleUpload = async (file: File) => {
+        setIsLoading(true);
+        setError(null);
+        try {
             const { base64, mimeType } = await imageUtils.fileToBase64(file);
             const dataUrl = `data:${mimeType};base64,${base64}`;
-            
-            logger.info(SOURCE, 'handleUpload: Starting new history session with uploaded image.');
-            setHistory([{ url: dataUrl, mimeType: mimeType, structuredDescription: null }]);
-            setHistoryIndex(0);
-            
             logger.info(SOURCE, 'Setting new session image dimensions from uploaded image.');
             const dims = await imageUtils.getImageDimensions(dataUrl);
             setSessionImageDimensions(dims);
             logger.info(SOURCE, `Session dimensions SET to: { width: ${dims.width}, height: ${dims.height} }`);
+            
+            setHistory([]);
+            setHistoryIndex(-1);
+            
+            await addHistoryState({ url: dataUrl, mimeType });
 
-            handleClearSelection();
-        });
-    }, [withLoading]);
+        } catch (e) {
+            const error = e as Error;
+            logger.error(SOURCE, `handleUpload: An error occurred: ${error.message}`);
+            setError(error.message);
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
+    // --- Selection & Editing Workflow ---
 
     const handleSelect = useCallback(async (box: BoundingBox) => {
-        logger.info(SOURCE, `handleSelect: Called with box: ${JSON.stringify(box)}`);
-        
-        if (editMode === 'pre_add') {
-            logger.info(SOURCE, `handleSelect: In 'pre_add' mode. Transitioning to 'add' mode.`);
-            setEditMode('add');
-            setSelectionBox(box);
-            return;
-        }
-        
-        await withLoading(async () => {
-            if (!currentImage) return;
+        if (!currentImage || isProcessingSelection) return;
 
-            const croppedImageBase64 = await imageUtils.cropImage(currentImage.url, box);
+        if (editMode === 'pre_add') {
+             logger.info(SOURCE, `handleSelect: Transitioning from 'pre_add' to 'add' mode.`);
+             setSelectionBox(box);
+             setEditMode('add');
+             setOriginalObjectDescription(null);
+             return;
+        }
+
+        setIsProcessingSelection(true);
+        setSelectionBox(box);
+        setError(null);
+        const apiKeyInfo = getApiKeyInfo();
+
+        try {
+            const { url, mimeType } = currentImage;
+            const croppedImageBase64 = await imageUtils.cropImage(url, box);
             setDebugImageUrl(`data:image/png;base64,${croppedImageBase64}`);
+
+            const description = await geminiService.describeObject(apiKeyInfo.key, apiKeyInfo.type, croppedImageBase64, 'image/png');
+            updateUsageCountIfNeeded();
             
-            const description = await geminiService.describeObject(croppedImageBase64, 'image/png');
-            
-            if (description === 'background') {
-                logger.info(SOURCE, 'handleSelect: Selection is background. Entering "add" mode.');
+            if (description.toLowerCase().includes('background')) {
+                logger.info(SOURCE, 'handleSelect: Selected area identified as "background". Entering ADD mode.');
                 setEditMode('add');
+                setOriginalObjectDescription(null);
             } else {
-                logger.info(SOURCE, `handleSelect: Found object "${description}". Entering "modify" mode.`);
-                setOriginalObjectDescription(description);
+                logger.info(SOURCE, `handleSelect: Selected area identified as "${description}". Entering MODIFY mode.`);
                 setEditMode('modify');
+                setOriginalObjectDescription(description);
             }
-            setSelectionBox(box); // Set selection box after analysis
-        }, 'processing');
-    }, [currentImage, withLoading, editMode]);
-    
+        } catch (e) {
+            const error = e as Error;
+            logger.error(SOURCE, `handleSelect: An error occurred: ${error.message}`);
+            setError(error.message);
+            setSelectionBox(null);
+            setEditMode(null);
+        } finally {
+            setIsProcessingSelection(false);
+        }
+    }, [currentImage, isProcessingSelection, editMode, getApiKeyInfo, updateUsageCountIfNeeded]);
+
     const handleClearSelection = useCallback(() => {
         logger.info(SOURCE, 'handleClearSelection: Called.');
         setSelectionBox(null);
         setEditMode(null);
         setOriginalObjectDescription(null);
         setPrompt('');
-        setPromptMode('freeform'); // Also reset prompt mode
-        setOriginalStructuredPrompt(null);
     }, []);
-    
-    const handleRequestAddObject = useCallback(() => {
-        logger.info(SOURCE, 'handleRequestAddObject: Called.');
-        handleClearSelection(); // Clear any existing selection first
-        setEditMode('pre_add');
-    }, [handleClearSelection]);
-    
-    const handleSetPromptMode = useCallback(async (mode: PromptMode) => {
-        logger.info(SOURCE, `handleSetPromptMode: Switching to ${mode} mode.`);
-        setPromptMode(mode);
-
-        if (mode === 'structured') {
-            const currentHistoryItem = history[historyIndex];
-            if (currentHistoryItem?.structuredDescription) {
-                logger.info(SOURCE, 'handleSetPromptMode: Using cached structured description.');
-                setPrompt(currentHistoryItem.structuredDescription);
-                setOriginalStructuredPrompt(currentHistoryItem.structuredDescription);
-                return;
-            }
-
-            await withLoading(async () => {
-                if (!currentImage) {
-                    throw new Error("Cannot generate structured prompt without an image.");
-                }
-                logger.info(SOURCE, 'handleSetPromptMode: Generating new structured description.');
-                setPrompt("Generating detailed description...");
-                const description = await geminiService.describeImageInDetail(
-                    imageUtils.getBase64FromDataUrl(currentImage.url),
-                    currentImage.mimeType
-                );
-                setPrompt(description);
-                setOriginalStructuredPrompt(description);
-
-                logger.info(SOURCE, 'handleSetPromptMode: Caching new structured description to history.');
-                setHistory(prevHistory => {
-                    const newHistory = [...prevHistory];
-                    if (newHistory[historyIndex]) {
-                        newHistory[historyIndex] = { ...newHistory[historyIndex], structuredDescription: description };
-                    }
-                    return newHistory;
-                });
-            }, 'processing');
-        } else {
-            setPrompt(''); // Clear prompt when switching back to freeform
-            setOriginalStructuredPrompt(null);
-        }
-    }, [currentImage, withLoading, history, historyIndex]);
 
     const handleRequestDeleteObject = useCallback(() => {
         logger.info(SOURCE, 'handleRequestDeleteObject: Called.');
-        if (!selectionBox || !originalObjectDescription || !currentImage) {
-            logger.error(SOURCE, 'handleRequestDeleteObject: Cannot delete, missing selection data or current image.');
-            return;
-        }
-        setConfirmationAction({
-            type: 'deleteObject',
-            data: {
+        if (selectionBox && originalObjectDescription && currentImage) {
+            const deleteData: DeleteActionData = {
                 box: selectionBox,
                 description: originalObjectDescription,
-                image: { // Create a complete snapshot to ensure the operation is atomic
-                    url: currentImage.url,
-                    mimeType: currentImage.mimeType,
-                }
-            }
-        });
+                image: { url: currentImage.url, mimeType: currentImage.mimeType }
+            };
+            setConfirmationAction({ type: 'deleteObject', data: deleteData });
+        } else {
+            logger.error(SOURCE, 'handleRequestDeleteObject: Could not request delete, missing required data.');
+        }
     }, [selectionBox, originalObjectDescription, currentImage]);
 
-    // "Smart Delete" flow
-    const handleConfirmDelete = useCallback(async () => {
-        if (confirmationAction?.type !== 'deleteObject') return;
+    const handleRequestAddObject = useCallback(() => {
+        logger.info(SOURCE, 'handleRequestAddObject: Called.');
+        setEditMode('pre_add');
+        setSelectionBox(null);
+        setOriginalObjectDescription(null);
+    }, []);
+
+    // --- Modal & Confirmation Logic ---
+
+    const handleConfirm = useCallback(async () => {
+        if (!confirmationAction) return;
+
+        const actionToProcess = confirmationAction;
+        setConfirmationAction(null);
+
+        const actionType = actionToProcess.type;
+        logger.info(SOURCE, `handleConfirm: User confirmed action: ${actionType}`);
+
+        if (actionType === 'newImage') {
+            handleReset();
+        } else if (actionType === 'deleteObject') {
+            const { box, description, image } = actionToProcess.data;
+            setIsLoading(true);
+            setError(null);
+            const apiKeyInfo = getApiKeyInfo();
+            try {
+                if (!sessionImageDimensions) {
+                    throw new Error("Cannot delete, session image dimensions are not set.");
+                }
+                const originalImageBase64 = imageUtils.getBase64FromDataUrl(image.url);
+                 logger.debug(SOURCE, `DELETE: Selection box for operation: ${JSON.stringify(box)}`);
+
+                logger.info(SOURCE, 'DELETE: Step 1 - Creating precise mask...');
+                const croppedObjectBase64 = await imageUtils.cropImage(image.url, box);
+                const preciseCroppedMaskBase64 = await geminiService.createPreciseMask(apiKeyInfo.key, apiKeyInfo.type, croppedObjectBase64, description);
+                updateUsageCountIfNeeded();
+
+                logger.info(SOURCE, 'DELETE: Step 1.5 - Binarizing mask to remove gray pixels...');
+                const binarizedMaskBase64 = await imageUtils.binarizeMask(preciseCroppedMaskBase64);
+                
+                logger.info(SOURCE, 'DELETE: Step 2 - Validating cleaned mask...');
+                const { isValid, analysis } = await imageUtils.analyzeMask(`data:image/png;base64,${binarizedMaskBase64}`);
+                let finalGlobalMaskBase64: string;
+
+                if (isValid) {
+                    logger.info(SOURCE, `DELETE: Mask validation PASSED. ${analysis}`);
+                    logger.info(SOURCE, 'DELETE: Step 2a - Scaling mask to selection box dimensions...');
+                    const scaledMaskBase64 = await imageUtils.scaleImage(binarizedMaskBase64, box.width, box.height);
+                    setDebugImageUrl(`data:image/png;base64,${scaledMaskBase64}`);
+
+                    logger.info(SOURCE, 'DELETE: Step 2b - Compositing scaled mask into final global mask...');
+                    const compositeMaskDataUrl = await imageUtils.compositeMask(
+                        sessionImageDimensions.width, sessionImageDimensions.height, scaledMaskBase64, box
+                    );
+                    finalGlobalMaskBase64 = imageUtils.getBase64FromDataUrl(compositeMaskDataUrl);
+                } else {
+                    logger.warn(SOURCE, `DELETE: Mask validation FAILED. ${analysis}. Falling back to simple box mask.`);
+                    const boxMaskDataUrl = await imageUtils.createMaskFromBox(sessionImageDimensions.width, sessionImageDimensions.height, box);
+                    finalGlobalMaskBase64 = imageUtils.getBase64FromDataUrl(boxMaskDataUrl);
+                }
+                
+                logger.info(SOURCE, 'DELETE: Step 3 - Inpainting background with final mask...');
+                const newDataUrl = await geminiService.inpaintBackground(
+                    apiKeyInfo.key, apiKeyInfo.type, originalImageBase64, image.mimeType, finalGlobalMaskBase64,
+                    sessionImageDimensions.width, sessionImageDimensions.height, description
+                );
+                updateUsageCountIfNeeded();
+
+                await addHistoryState({ url: newDataUrl, mimeType: imageUtils.getMimeTypeFromDataUrl(newDataUrl) });
+
+            } catch (e) {
+                const error = e as Error;
+                logger.error(SOURCE, `handleConfirm (delete): An error occurred: ${error.message}`);
+                setError(error.message);
+            } finally {
+                setIsLoading(false);
+                setSelectionBox(null);
+                setEditMode(null);
+                setOriginalObjectDescription(null);
+            }
+        }
+    }, [confirmationAction, handleReset, sessionImageDimensions, addHistoryState, getApiKeyInfo, updateUsageCountIfNeeded]);
+
+    const handleCancel = useCallback(() => {
+        logger.info(SOURCE, 'handleCancel: User cancelled action.');
+        setConfirmationAction(null);
+    }, []);
     
-        logger.info(SOURCE, 'handleConfirmDelete [Smart Delete]: User confirmed.');
-        const { box, description, image } = confirmationAction.data;
-        setConfirmationAction(null); // Close modal immediately
+    // --- Settings & Error Logic ---
+    
+    const handleSaveApiKey = (key: string) => {
+        logger.info(SOURCE, 'handleSaveApiKey: Called.');
+        setSessionApiKey(key);
+        setIsSettingsModalOpen(false);
+        setError(null);
+    };
+
+    const handleRequestUpdateApiKey = useCallback(() => {
+        logger.info(SOURCE, 'handleRequestUpdateApiKey: User requested to update API key from error modal.');
+        setError(null);
+        setIsSettingsModalOpen(true);
+    }, []);
+    
+    // --- Structured Edit Logic ---
+    
+    const handleSetPromptMode = useCallback(async (mode: PromptMode) => {
+        logger.info(SOURCE, `handleSetPromptMode: Called with mode: ${mode}.`);
+        setPromptMode(mode);
+        setPrompt('');
         
-        await withLoading(async () => {
-            if (!image || !box || !description || !sessionImageDimensions) {
-                throw new Error("Cannot Smart Delete object: required state is missing from confirmation data.");
+        if (mode === 'structured' && currentImage) {
+            if (currentImage.structuredDescription) {
+                 logger.info(SOURCE, 'handleSetPromptMode: Found cached structured prompt. Using it.');
+                 setOriginalStructuredPrompt(currentImage.structuredDescription);
+                 setPrompt(currentImage.structuredDescription);
+                 return;
             }
 
-            const currentImageDims = await imageUtils.getImageDimensions(image.url);
-            const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, box);
-            const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
+            setIsProcessingSelection(true);
+            setError(null);
+            const apiKeyInfo = getApiKeyInfo();
+            try {
+                const imageBase64 = imageUtils.getBase64FromDataUrl(currentImage.url);
+                const description = await geminiService.describeImageInDetail(apiKeyInfo.key, apiKeyInfo.type, imageBase64, currentImage.mimeType);
+                updateUsageCountIfNeeded();
+                setOriginalStructuredPrompt(description);
+                setPrompt(description);
+                
+                setHistory(prevHistory => {
+                    const newHistory = [...prevHistory];
+                    const currentItem = newHistory[historyIndex];
+                    if (currentItem) {
+                        newHistory[historyIndex] = { ...currentItem, structuredDescription: description };
+                    }
+                    return newHistory;
+                });
 
-            const inpaintedImageUrl = await geminiService.inpaintBackground(
-                imageUtils.getBase64FromDataUrl(image.url),
-                image.mimeType,
-                maskBase64,
-                sessionImageDimensions.width,
-                sessionImageDimensions.height,
-                description,
-            );
-
-            if (inpaintedImageUrl) {
-                const newMimeType = imageUtils.getMimeTypeFromDataUrl(inpaintedImageUrl);
-                await addHistoryState({ url: inpaintedImageUrl, mimeType: newMimeType });
-                handleClearSelection();
-            } else {
-                throw new Error('Inpainting failed to return an image.');
+            } catch(e) {
+                const error = e as Error;
+                logger.error(SOURCE, `handleSetPromptMode: Failed to generate structured prompt: ${error.message}`);
+                setError('Failed to generate structured description.');
+                setPromptMode('freeform');
+            } finally {
+                setIsProcessingSelection(false);
             }
-        });
-    }, [confirmationAction, withLoading, sessionImageDimensions, addHistoryState, handleClearSelection]);
-
-    // New "Hard Delete" flow
-    const handleForceDelete = useCallback(async () => {
-        if (confirmationAction?.type !== 'deleteObject') return;
-
-        logger.info(SOURCE, 'handleForceDelete [Hard Delete]: User confirmed.');
-        const { box, image, description } = confirmationAction.data;
-        setConfirmationAction(null); // Close modal immediately
-
-        await withLoading(async () => {
-            if (!image || !box || !description || !sessionImageDimensions) {
-                throw new Error("Cannot Force Delete object: required state is missing from confirmation data.");
-            }
-
-            // Step 1: Client-side clear
-            logger.info(SOURCE, 'handleForceDelete: Clearing area with border color.');
-            const clearedImageUrl = await imageUtils.clearAreaWithBorderColor(image.url, box);
-            
-            // Step 2: Create mask for the cleared area
-            const currentImageDims = await imageUtils.getImageDimensions(clearedImageUrl);
-            const fullMaskUrl = await imageUtils.createMaskFromBox(currentImageDims.width, currentImageDims.height, box);
-            const maskBase64 = imageUtils.getBase64FromDataUrl(fullMaskUrl);
-            
-            // Step 3: Ask AI to smooth over the cleared area
-            logger.info(SOURCE, 'handleForceDelete: Asking AI to smooth over cleared area.');
-            const finalImageUrl = await geminiService.smoothClearedArea(
-                imageUtils.getBase64FromDataUrl(clearedImageUrl),
-                imageUtils.getMimeTypeFromDataUrl(clearedImageUrl),
-                maskBase64,
-                sessionImageDimensions.width,
-                sessionImageDimensions.height,
-                description
-            );
-
-            if (finalImageUrl) {
-                const newMimeType = imageUtils.getMimeTypeFromDataUrl(finalImageUrl);
-                await addHistoryState({ url: finalImageUrl, mimeType: newMimeType });
-                handleClearSelection();
-            } else {
-                throw new Error('Force Delete smoothing failed to return an image.');
-            }
-        });
-    }, [confirmationAction, withLoading, sessionImageDimensions, addHistoryState, handleClearSelection]);
+        } else if (mode === 'freeform') {
+            setOriginalStructuredPrompt(null);
+        }
+    }, [currentImage, historyIndex, getApiKeyInfo, updateUsageCountIfNeeded]);
     
-    // --- Test Harness Integration ---
-    const handleEnterTestMode = useCallback(() => {
-        logger.warn(SOURCE, 'Entering Test Mode.');
-        setIsTestMode(true);
-    }, []);
-    const handleExitTestMode = useCallback(() => {
-        logger.warn(SOURCE, 'Exiting Test Mode.');
-        setIsTestMode(false);
-        handleReset();
-    }, [handleReset]);
+    const handleDownload = () => {
+        if (currentImage) {
+            const a = document.createElement('a');
+            a.href = currentImage.url;
+            const now = new Date();
+            const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}_${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
+            const fileExtension = currentImage.mimeType.split('/')[1] || 'png';
+            a.download = `banana_peel_${timestamp}.${fileExtension}`;
+            document.body.appendChild(a);
+a.click();
+            document.body.removeChild(a);
+        }
+    };
     
-    
-    // --- Test Handles ---
-    useEffect(() => {
-        stateRef.current = {
-            history,
-            historyIndex,
-            selectionBox,
-            editMode,
-            originalObjectDescription,
-            prompt,
-            error,
-            isLoading,
-        };
-    });
-    
-    useEffect(() => {
-        handlersRef.current = {
-            upload: handleUpload,
-            select: handleSelect,
-            generate: handleGenerate,
-            undo: handleUndo,
-            redo: handleRedo,
-            reset: handleReset,
-        };
-    }, [handleUpload, handleSelect, handleGenerate, handleUndo, handleRedo, handleReset]);
-    
-    const testHandles: AppTestHandles = useMemo(() => ({
-        upload: (file) => handlersRef.current.upload(file),
-        select: (box) => handlersRef.current.select(box),
-        generate: () => handlersRef.current.generate(),
-        setPrompt: (newPrompt) => setPrompt(newPrompt),
-        undo: () => handlersRef.current.undo(),
-        redo: () => handlersRef.current.redo(),
-        getState: () => stateRef.current,
-        reset: () => handlersRef.current.reset(),
-        setLogger: (logFn) => logger.setTestHarnessLogger(logFn),
-    }), []);
-    
-    // --- Log Viewer Handlers ---
-    const handleDismissLogs = useCallback(() => {
-        logger.info(SOURCE, 'handleDismissLogs: Called.');
-        setIsLogViewerVisible(false);
-    }, []);
-
-    const handleDownloadLogs = useCallback(() => {
-        logger.info(SOURCE, 'handleDownloadLogs: Called.');
-        const logText = sessionLogs.join('\n');
-        const blob = new Blob([logText], { type: 'text/plain' });
+    const handleDownloadLogs = () => {
+        const blob = new Blob([sessionLogs.join('\n')], { type: 'text/plain' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `banana_peel_logs_${new Date().toISOString()}.txt`;
+        const now = new Date();
+        const timestamp = `${now.getFullYear()}${(now.getMonth() + 1).toString().padStart(2, '0')}${now.getDate().toString().padStart(2, '0')}_${now.getHours().toString().padStart(2, '0')}${now.getMinutes().toString().padStart(2, '0')}${now.getSeconds().toString().padStart(2, '0')}`;
+        a.download = `banana_peel_logs_${timestamp}.txt`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-    }, [sessionLogs]);
+    };
 
-    const handleOpenApiInspector = useCallback(() => {
-        logger.info(SOURCE, 'handleOpenApiInspector: Called.');
-        setIsApiInspectorOpen(true);
-    }, []);
 
-    const handleCloseApiInspector = useCallback(() => {
-        logger.info(SOURCE, 'handleCloseApiInspector: Called.');
-        setIsApiInspectorOpen(false);
-    }, []);
-
-    // --- Settings Modal Handlers ---
-    const handleOpenSettings = useCallback(() => setIsSettingsModalOpen(true), []);
-    const handleCloseSettings = useCallback(() => setIsSettingsModalOpen(false), []);
-    const handleSaveSettings = useCallback((apiKey: string) => {
-        logger.info(SOURCE, 'handleSaveSettings: Saving new API key.');
-        apiKeyStore.setApiKey(apiKey);
-        setIsSettingsModalOpen(false);
-        // Optionally, show a success message
-    }, []);
+    // --- Test Harness Integration ---
+    const handleEnterTestMode = () => {
+        setIsTestMode(true);
+        logger.setTestHarnessLogger((message: string) => {});
+    };
     
-    // --- Expanded Edit Modal Handlers ---
-    const handleOpenExpandedEditModal = useCallback(() => setIsExpandedEditModalOpen(true), []);
-    const handleCloseExpandedEditModal = useCallback(() => setIsExpandedEditModalOpen(false), []);
+    const handleExitTestMode = () => {
+        setIsTestMode(false);
+        logger.setTestHarnessLogger(null);
+        handleReset();
+    };
 
+    useEffect(() => {
+        stateRef.current = {
+            history, historyIndex, selectionBox, editMode, originalObjectDescription,
+            prompt, error, isLoading,
+        };
+    }, [history, historyIndex, selectionBox, editMode, originalObjectDescription, prompt, error, isLoading]);
+
+    useEffect(() => {
+        handlersRef.current = {
+            upload: handleUpload, select: handleSelect, generate: handleGenerate,
+            undo: () => handleHistoryNavigation('undo'), redo: () => handleHistoryNavigation('redo'),
+            reset: handleReset,
+        };
+    }, [handleUpload, handleSelect, handleGenerate, handleHistoryNavigation, handleReset]);
+
+    const testHandles = useMemo<AppTestHandles>(() => ({
+        ...handlersRef.current,
+        getState: () => stateRef.current,
+        setPrompt: setPrompt,
+        setLogger: (logFn) => logger.setTestHarnessLogger(logFn),
+    }), []);
+    
+    const showLogViewer = isLogViewerVisible && !isTestMode;
 
     return (
-        <div className="flex h-screen bg-gray-900 text-white font-sans flex-col">
-            <main className="flex flex-grow overflow-hidden">
-                <PromptPanel
-                    prompt={prompt}
-                    setPrompt={setPrompt}
-                    onGenerate={handleGenerate}
-                    onUpload={handleUpload}
-                    isLoading={isLoading}
-                    isProcessingSelection={isProcessingSelection}
-                    isRateLimited={isRateLimited}
-                    isInEditState={isInEditState}
-                    editMode={editMode}
-                    onClearSelection={handleClearSelection}
-                    objectDescription={originalObjectDescription}
-                    onEnterTestMode={handleEnterTestMode}
-                    onOpenSettings={handleOpenSettings}
-                    promptMode={promptMode}
-                    onSetPromptMode={handleSetPromptMode}
-                    onDeleteObject={handleRequestDeleteObject}
-                    onOpenExpandedEditModal={handleOpenExpandedEditModal}
-                />
-                <div className="flex-grow flex flex-col p-8">
-                    {isInEditState && (
-                        <div className="flex-shrink-0 bg-gray-900 border border-gray-700 rounded-t-lg flex items-center justify-between px-4 h-14">
-                             <div className="flex items-center space-x-2">
-                                <button
-                                    onClick={handleUndo}
-                                    disabled={!canUndo || isLoading || isProcessingSelection || isSubEditing}
-                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-                                    aria-label="Undo"
-                                >
-                                    <UndoIcon className="w-5 h-5" />
-                                </button>
-                                <button
-                                    onClick={handleRedo}
-                                    disabled={!canRedo || isLoading || isProcessingSelection || isSubEditing}
-                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-                                    aria-label="Redo"
-                                >
-                                    <RedoIcon className="w-5 h-5" />
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        if (!currentImage) return;
-                                        const a = document.createElement('a');
-                                        a.href = currentImage.url;
-                                        a.download = `banana_peel_${new Date().toISOString()}.png`;
-                                        a.click();
-                                    }}
-                                    disabled={!currentImage || isLoading || isProcessingSelection || isSubEditing}
-                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-                                    aria-label="Download Image"
-                                >
-                                    <DownloadIcon className="w-5 h-5" />
-                                </button>
-                             </div>
-                             <div className="flex items-center space-x-2">
-                                <button
-                                    onClick={handleRequestAddObject}
-                                    disabled={isLoading || isProcessingSelection || isSubEditing}
-                                    className="p-2 bg-gray-700 hover:bg-gray-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
-                                    aria-label="Add Object"
-                                >
-                                    <PlusIcon className="w-5 h-5" />
-                                </button>
-                                <button 
-                                    onClick={handleNewImage}
-                                    disabled={isLoading || isProcessingSelection || isSubEditing}
-                                    className="px-4 py-2 text-sm bg-yellow-500 text-gray-900 hover:bg-yellow-400 rounded-md font-semibold disabled:opacity-50"
-                                >
-                                    New Image
-                                </button>
-                             </div>
+        <div className="flex h-screen bg-gray-900 text-white">
+            <PromptPanel
+                prompt={prompt} setPrompt={setPrompt} onGenerate={handleGenerate} onUpload={handleUpload}
+                isLoading={isLoading} isProcessingSelection={isProcessingSelection} isRateLimited={isRateLimited}
+                isInEditState={isInEditState} editMode={editMode} onClearSelection={handleClearSelection}
+                objectDescription={originalObjectDescription} onEnterTestMode={handleEnterTestMode}
+                onOpenSettings={() => setIsSettingsModalOpen(true)} promptMode={promptMode}
+                onSetPromptMode={handleSetPromptMode} onDeleteObject={handleRequestDeleteObject}
+                onOpenExpandedEditModal={() => setIsExpandedEditModalOpen(true)}
+            />
+            <div className="flex-grow flex flex-col">
+                {isInEditState && (
+                    <div className="bg-gray-800 h-16 flex-shrink-0 flex items-center justify-between px-4 border-b border-gray-700 shadow-md">
+                        <div className="flex items-center space-x-2">
+                             <button
+                                onClick={() => handleHistoryNavigation('undo')}
+                                disabled={!canUndo || isSubEditing || isLoading}
+                                className="p-2 text-gray-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Undo last action"
+                            >
+                                <UndoIcon className="w-6 h-6" />
+                            </button>
+                            <button
+                                onClick={() => handleHistoryNavigation('redo')}
+                                disabled={!canRedo || isSubEditing || isLoading}
+                                className="p-2 text-gray-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Redo last action"
+                            >
+                                <RedoIcon className="w-6 h-6" />
+                            </button>
+                            <button
+                                onClick={handleDownload}
+                                disabled={isSubEditing || isLoading}
+                                className="p-2 text-gray-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Download current image"
+                            >
+                                <DownloadIcon className="w-6 h-6" />
+                            </button>
                         </div>
-                    )}
-                    <CanvasArea
-                        imageUrl={currentImage?.url ?? null}
-                        onSelect={handleSelect}
-                        isLoading={isLoading}
-                        isProcessingSelection={isProcessingSelection}
-                        selectionBox={selectionBox}
-                        editMode={editMode}
+                        <div className="flex items-center space-x-2">
+                             <button
+                                onClick={handleRequestAddObject}
+                                disabled={isSubEditing || isLoading}
+                                className="p-2 text-gray-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                aria-label="Add a new object"
+                            >
+                                <PlusIcon className="w-6 h-6" />
+                            </button>
+                            <button
+                                onClick={handleNewImage}
+                                disabled={isSubEditing || isLoading}
+                                className="px-4 py-2 text-sm font-semibold bg-gray-700 hover:bg-gray-600 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                New Image
+                            </button>
+                        </div>
+                    </div>
+                )}
+                <CanvasArea
+                    imageUrl={currentImage?.url ?? null} onSelect={handleSelect} isLoading={isLoading}
+                    isProcessingSelection={isProcessingSelection} selectionBox={selectionBox} editMode={editMode}
+                />
+            </div>
+            {showLogViewer && (
+                <div className="absolute bottom-0 left-0 right-0 z-10">
+                    <LogViewer
+                        logs={sessionLogs} onDismiss={() => setIsLogViewerVisible(false)} onDownload={handleDownloadLogs}
+                        onOpenApiInspector={() => setIsApiInspectorOpen(true)}
                     />
                 </div>
-            </main>
-            
-            {isLogViewerVisible && !isTestMode && (
-                <LogViewer 
-                    logs={sessionLogs} 
-                    onDismiss={handleDismissLogs} 
-                    onDownload={handleDownloadLogs} 
-                    onOpenApiInspector={handleOpenApiInspector}
-                />
             )}
-
+            
             {confirmationAction && (
-                <>
+                <ConfirmationModal
+                    isOpen={!!confirmationAction} onConfirm={handleConfirm} onCancel={handleCancel}
+                    title={confirmationAction.type === 'newImage' ? 'Start a New Image?' : 'Please confirm delete'}
+                    confirmText={confirmationAction.type === 'newImage' ? 'Confirm' : 'Delete'}
+                >
                     {confirmationAction.type === 'newImage' && (
-                        <ConfirmationModal
-                            isOpen={true}
-                            onConfirm={() => { setConfirmationAction(null); handleReset(); }}
-                            onCancel={() => setConfirmationAction(null)}
-                            title="Start a New Image?"
-                            confirmText="Confirm"
-                        >
-                            <p className="text-sm text-gray-400">
-                                Your current image and history will be lost. This action cannot be undone.
-                            </p>
-                        </ConfirmationModal>
+                        <p className="text-sm text-gray-400">
+                            Your current image and history will be lost. This action cannot be undone.
+                        </p>
                     )}
                     {confirmationAction.type === 'deleteObject' && (
-                        <ConfirmationModal
-                            isOpen={true}
-                            onConfirm={handleConfirmDelete}
-                            onCancel={() => setConfirmationAction(null)}
-                            title="Please confirm delete"
-                            confirmText="Delete"
-                            onForceConfirm={handleForceDelete}
-                            forceConfirmText="Force Delete"
-                            forceConfirmMessage="Some objects with unclear boundaries are hard to delete. Force delete removes everything in the selection box."
-                        >
-                            <div />
-                        </ConfirmationModal>
+                        <p className="text-sm text-gray-400">
+                            The selected object will be removed.
+                        </p>
                     )}
-                </>
+                </ConfirmationModal>
             )}
 
-            <SettingsModal 
+            <SettingsModal
                 isOpen={isSettingsModalOpen}
-                onClose={handleCloseSettings}
-                onSave={handleSaveSettings}
+                onClose={() => setIsSettingsModalOpen(false)}
+                onSave={handleSaveApiKey}
+                isSessionKeySet={!!sessionApiKey}
+                usageCount={usageCount}
+            />
+
+            <ErrorModal
+                isOpen={!!error} errorMessage={error || ''} onCancel={() => setError(null)}
+                onUpdateApiKey={handleRequestUpdateApiKey}
             />
 
             <ApiCallInspectorModal
-                isOpen={isApiInspectorOpen}
-                onClose={handleCloseApiInspector}
+                isOpen={isApiInspectorOpen} onClose={() => setIsApiInspectorOpen(false)}
                 history={apiCallHistory}
             />
-
+            
             <ExpandedEditModal
-                isOpen={isExpandedEditModalOpen}
-                onClose={handleCloseExpandedEditModal}
-                prompt={prompt}
-                setPrompt={setPrompt}
-                onGenerate={handleGenerate}
-                isLoading={isLoading}
-                isProcessingSelection={isProcessingSelection}
-                isRateLimited={isRateLimited}
-                promptMode={promptMode}
-                onSetPromptMode={handleSetPromptMode}
+                isOpen={isExpandedEditModalOpen} onClose={() => setIsExpandedEditModalOpen(false)}
+                prompt={prompt} setPrompt={setPrompt} onGenerate={handleGenerate} isLoading={isLoading}
+                isProcessingSelection={isProcessingSelection} isRateLimited={isRateLimited}
+                promptMode={promptMode} onSetPromptMode={handleSetPromptMode}
             />
 
-            {isTestMode && <TestHarness onExit={handleExitTestMode} handles={testHandles} debugImageUrl={debugImageUrl} />}
+            {isTestMode && (
+                <TestHarness onExit={handleExitTestMode} handles={testHandles} debugImageUrl={debugImageUrl} />
+            )}
         </div>
     );
 };

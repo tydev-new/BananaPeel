@@ -135,6 +135,15 @@ export const analyzeMask = (maskUrl: string): Promise<{ isValid: boolean; analys
             const PIXEL_THRESHOLD = 10; // How dark a pixel can be and still be considered "black"
             let nonBlackPixels = 0;
 
+            // Don't sample if image is tiny
+            if (width < 5 || height < 5) {
+                resolve({
+                    isValid: false,
+                    analysis: `WARNING: Mask is too small (${width}x${height}) to analyze reliably. Assuming invalid.`
+                });
+                return;
+            }
+
             for (let i = 0; i < SAMPLES; i++) {
                 const x = Math.floor(Math.random() * width);
                 const y = Math.floor(Math.random() * height);
@@ -167,73 +176,205 @@ export const analyzeMask = (maskUrl: string): Promise<{ isValid: boolean; analys
 };
 
 /**
- * Clears a rectangular area in an image by filling it with the average color of its border.
- * This is the first step of the 'Hard Delete' workflow.
- * @param imageUrl The data URL of the image to modify.
- * @param box The bounding box of the area to clear.
- * @returns A promise that resolves to the data URL of the modified image.
+ * Creates a full-size mask by placing a smaller, cropped mask onto a black background.
+ * @param imageWidth The width of the final, full-size mask.
+ * @param imageHeight The height of the final, full-size mask.
+ * @param croppedMaskBase64 The base64 string of the precise mask generated for the cropped object.
+ * @param box The bounding box defining where to place the cropped mask.
+ * @returns A promise that resolves to the data URL of the final, composite mask.
  */
-export const clearAreaWithBorderColor = (imageUrl: string, box: BoundingBox): Promise<string> => {
-    logger.debug(SOURCE, `clearAreaWithBorderColor: Called for box ${JSON.stringify(box)}`);
+export const compositeMask = (
+    imageWidth: number,
+    imageHeight: number,
+    croppedMaskBase64: string,
+    box: BoundingBox
+): Promise<string> => {
+    logger.debug(SOURCE, `compositeMask: Called for box ${JSON.stringify(box)}`);
     return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.crossOrigin = "Anonymous";
-        img.onload = () => {
+        const croppedMaskImg = new Image();
+        croppedMaskImg.onload = () => {
+            logger.debug(SOURCE, `compositeMask: Loaded mask image with dimensions ${croppedMaskImg.width}x${croppedMaskImg.height} for compositing.`);
             const canvas = document.createElement('canvas');
-            canvas.width = img.naturalWidth;
-            canvas.height = img.naturalHeight;
-            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+            canvas.width = imageWidth;
+            canvas.height = imageHeight;
+            const ctx = canvas.getContext('2d');
             if (!ctx) {
-                return reject(new Error('Could not get canvas context for clearing area.'));
+                return reject(new Error('Could not get canvas context for compositing mask.'));
             }
 
-            ctx.drawImage(img, 0, 0);
+            // Fill the entire canvas with black
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, imageWidth, imageHeight);
 
-            let totalR = 0, totalG = 0, totalB = 0, count = 0;
-            const sampleOffset = 2; // Sample pixels 2px outside the box
+            // Draw the small, precise mask at the correct location
+            ctx.drawImage(croppedMaskImg, box.x, box.y);
 
-            const samplePerimeter = () => {
-                const addPixel = (x: number, y: number) => {
-                    if (x >= 0 && x < img.naturalWidth && y >= 0 && y < img.naturalHeight) {
-                        const data = ctx.getImageData(x, y, 1, 1).data;
-                        totalR += data[0];
-                        totalG += data[1];
-                        totalB += data[2];
-                        count++;
-                    }
-                };
-
-                // Top and bottom borders
-                for (let i = 0; i < box.width; i++) {
-                    addPixel(box.x + i, box.y - sampleOffset);
-                    addPixel(box.x + i, box.y + box.height + sampleOffset);
-                }
-                // Left and right borders
-                for (let i = 0; i < box.height; i++) {
-                    addPixel(box.x - sampleOffset, box.y + i);
-                    addPixel(box.x + box.width + sampleOffset, box.y + i);
-                }
-            };
-
-            samplePerimeter();
-
-            if (count === 0) {
-                 logger.warn(SOURCE, 'clearAreaWithBorderColor: No perimeter pixels sampled. Defaulting to white fill.');
-                ctx.fillStyle = 'white';
-            } else {
-                const avgR = Math.round(totalR / count);
-                const avgG = Math.round(totalG / count);
-                const avgB = Math.round(totalB / count);
-                ctx.fillStyle = `rgb(${avgR}, ${avgG}, ${avgB})`;
-                logger.debug(SOURCE, `clearAreaWithBorderColor: Average border color: rgb(${avgR}, ${avgG}, ${avgB})`);
-            }
-            
-            ctx.fillRect(box.x, box.y, box.width, box.height);
-            
             const dataUrl = canvas.toDataURL('image/png');
             resolve(dataUrl);
         };
-        img.onerror = () => reject(new Error('Image could not be loaded for clearing area.'));
-        img.src = imageUrl;
+        croppedMaskImg.onerror = () => reject(new Error('Cropped mask image could not be loaded for compositing.'));
+        croppedMaskImg.src = `data:image/png;base64,${croppedMaskBase64}`;
+    });
+};
+
+/**
+ * Scales a base64 image to a target width and height.
+ * @param imageBase64 The base64 string of the image to scale.
+ * @param width The target width.
+ * @param height The target height.
+ * @returns A promise that resolves to the base64 string of the scaled image.
+ */
+export const scaleImage = (imageBase64: string, width: number, height: number): Promise<string> => {
+    logger.debug(SOURCE, `scaleImage: Called to scale image to ${width}x${height}`);
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                return reject(new Error('Could not get canvas context for scaling image.'));
+            }
+            ctx.drawImage(img, 0, 0, width, height);
+            const dataUrl = canvas.toDataURL('image/png');
+            resolve(dataUrl.split(',')[1]); // Return just the base64 part
+        };
+        img.onerror = () => reject(new Error('Image could not be loaded for scaling.'));
+        img.src = `data:image/png;base64,${imageBase64}`;
+    });
+};
+
+/**
+ * Programmatically cleans a mask image, forcing all non-black pixels to be solid white.
+ * @param imageBase64 The base64 string of the mask image to clean.
+ * @returns A promise that resolves to the base64 string of the binarized mask.
+ */
+export const binarizeMask = (imageBase64: string): Promise<string> => {
+    logger.debug(SOURCE, 'binarizeMask: Called to clean mask by forcing it to black and white.');
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const width = img.width;
+            const height = img.height;
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) {
+                return reject(new Error('Could not get canvas context for binarizing mask.'));
+            }
+            ctx.drawImage(img, 0, 0);
+
+            const imageData = ctx.getImageData(0, 0, width, height);
+            const data = imageData.data;
+            const BRIGHTNESS_THRESHOLD = 40; // Average brightness (0-255) to distinguish dark from light pixels.
+
+            for (let i = 0; i < data.length; i += 4) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                
+                // Calculate the average brightness of the pixel.
+                const averageBrightness = (r + g + b) / 3;
+                
+                if (averageBrightness > BRIGHTNESS_THRESHOLD) {
+                    // Pixel is light enough, set to solid white.
+                    data[i] = 255;
+                    data[i + 1] = 255;
+                    data[i + 2] = 255;
+                } else {
+                    // Pixel is dark, set to solid black.
+                    data[i] = 0;
+                    data[i + 1] = 0;
+                    data[i + 2] = 0;
+                }
+                // Ensure alpha is always fully opaque for a clean mask
+                data[i + 3] = 255;
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+            const dataUrl = canvas.toDataURL('image/png');
+            resolve(dataUrl.split(',')[1]); // Return just the base64 part
+        };
+        img.onerror = () => reject(new Error('Image could not be loaded for binarization.'));
+        img.src = `data:image/png;base64,${imageBase64}`;
+    });
+};
+
+/**
+ * [DIAGNOSTIC] Creates a transparent "hole" in an image based on a mask.
+ * This implementation uses direct pixel manipulation for maximum reliability.
+ * @param imageUrl The data URL of the original image.
+ * @param maskUrl The data URL of the mask to apply.
+ * @returns A promise that resolves to the data URL of the image with the masked area erased.
+ */
+export const punchOutMask = (imageUrl: string, maskUrl: string): Promise<string> => {
+    logger.debug(SOURCE, 'punchOutMask: Called with new pixel manipulation logic.');
+    return new Promise((resolve, reject) => {
+        const originalImg = new Image();
+        originalImg.crossOrigin = "Anonymous";
+
+        originalImg.onload = () => {
+            const maskImg = new Image();
+            maskImg.crossOrigin = "Anonymous";
+            
+            maskImg.onload = () => {
+                const canvas = document.createElement('canvas');
+                const width = originalImg.naturalWidth;
+                const height = originalImg.naturalHeight;
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                if (!ctx) {
+                    return reject(new Error('Could not get canvas context for punching out mask.'));
+                }
+
+                // Temp canvas for mask to read its pixel data
+                const maskCanvas = document.createElement('canvas');
+                maskCanvas.width = width;
+                maskCanvas.height = height;
+                const maskCtx = maskCanvas.getContext('2d', { willReadFrequently: true });
+                if (!maskCtx) {
+                    return reject(new Error('Could not get mask canvas context.'));
+                }
+                
+                // 1. Draw original image to the main (visible) canvas
+                ctx.drawImage(originalImg, 0, 0);
+                
+                // 2. Draw mask to the temporary (hidden) canvas
+                maskCtx.drawImage(maskImg, 0, 0, width, height);
+
+                // 3. Get the raw pixel data for both canvases
+                const originalImageData = ctx.getImageData(0, 0, width, height);
+                const maskImageData = maskCtx.getImageData(0, 0, width, height);
+
+                const originalData = originalImageData.data;
+                const maskData = maskImageData.data;
+                
+                const BRIGHTNESS_THRESHOLD = 128;
+
+                // 4. Iterate through every pixel of the mask
+                for (let i = 0; i < maskData.length; i += 4) {
+                    // Check the brightness of the mask pixel (the R channel is sufficient for a B&W mask)
+                    if (maskData[i] > BRIGHTNESS_THRESHOLD) {
+                        // If the mask pixel is white, make the corresponding pixel
+                        // in the original image fully transparent.
+                        originalData[i + 3] = 0; // Set Alpha to 0
+                    }
+                }
+
+                // 5. Write the modified pixel data back to the main canvas
+                ctx.putImageData(originalImageData, 0, 0);
+
+                resolve(canvas.toDataURL('image/png'));
+            };
+            
+            maskImg.onerror = () => reject(new Error('Mask image could not be loaded for punch-out.'));
+            maskImg.src = maskUrl;
+        };
+        
+        originalImg.onerror = () => reject(new Error('Original image could not be loaded for punch-out.'));
+        originalImg.src = imageUrl;
     });
 };

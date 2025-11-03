@@ -1,8 +1,8 @@
 # Product Requirements Document: Banana Peel
 
-**Version:** 1.0
+**Version:** 1.1
 **Status:** In Development
-**Date:** 2023-10-27
+**Date:** 2023-12-08
 
 ## 1. Introduction & Vision
 
@@ -30,126 +30,73 @@
 *   **As a Hobbyist,** I want to click an 'Add Object' button and be guided to select an area on my image, then describe "a flying saucer in the sky" to see how the AI blends it into the scene.
 *   **As any user,** I want to click a "New Image" button to clear my canvas and start over without having to refresh the page.
 *   **As a Power User,** I want to access and download the debug logs for my current session so that I can attach them to a bug report when something goes wrong.
-*   **As a Power User,** I want to enter my own Gemini API key so that I can use my own API quota and manage my usage independently of the application's default key.
-*   **As a new user,** when I try to generate an image without having set an API key, I want to be automatically prompted to enter one, so that I can get started quickly.
+*   **As a Power User,** I want to enter my own Gemini API key for my current session, so that I can use my own API quota and not worry about it being stored in my browser.
+*   **As a new user,** when I first use the app, I want a limited number of free uses with the default key, so I can try out the features before needing my own key.
+*   **As a new user,** after I've used up my free quota, I want to be clearly prompted to add my own API key so I can continue using the application.
 *   **As a Creative Explorer,** I want to view a detailed description of my image and edit that description directly, so that I can make precise, granular changes to the scene.
 *   **As a Creative Explorer,** when editing a long, structured description, I want to open an expanded, full-screen editor so I can see and edit the entire text comfortably.
 *   **As a Power User,** I want to inspect the full details of recent API calls, including the exact prompts and visual payloads, so I can effectively debug the application's multimodal interactions.
 *   **As any user,** if the smart object deletion fails, I want a more reliable "Force Delete" option that guarantees removal of everything in my selection, so I always have control over the editing process.
+*   **As any user,** when an API call fails due to a missing key or quota issue, I want to see a clear error message in a dialog box with an option to update my API key, so I can quickly resolve the issue.
 
 ## 4. Feature Breakdown
 
-This section details the core features of the Banana Peel application, now organized by the distinct "Generation" and "Editing" states.
+This section details the core features of the Banana Peel application.
 
 ### 4.1. "Generation" State (Initial State)
 
-This is the application's default state when a user first arrives or starts a new image. The UI is focused exclusively on creating the initial image.
+This is the application's default state. The UI is focused exclusively on creating the initial image.
 
 *   **4.1.1. Text-to-Image Generation:**
-    *   **Description:** Users can generate a new image from scratch by entering a descriptive text prompt in the main input area.
-    *   **Acceptance Criteria:**
-        *   The main button is labeled "Generate Image".
-        *   Clicking the button sends the prompt to the Gemini API.
-        *   The generated image appears on the canvas, and the application transitions to the "Editing" state.
+    *   **Description:** Users can generate a new image from scratch by entering a descriptive text prompt.
 *   **4.1.2. Image Upload:**
     *   **Description:** Users can upload their own image (PNG, JPEG) to serve as the base for editing.
-    *   **Acceptance Criteria:**
-        *   An "Upload an Image" button is visible.
-        *   Uploading an image displays it on the canvas, and the application transitions to the "Editing" state.
 
 ### 4.2. "Editing" State
 
 This state is active as soon as an image is present on the canvas. The UI changes to provide a focused editing experience.
 
 *   **4.2.1. Canvas Header & Session Controls:**
-    *   **Description:** A new header appears above the main canvas area, consolidating all session-level actions.
-    *   **Acceptance Criteria:**
-        *   This header contains icon buttons for "Undo", "Redo", and "Download" on the left.
-        *   It contains a "New Image" button on the right, and an "Add Object" (+) icon to its left.
-        *   All controls in this header are disabled when the user is in a sub-editing workflow (e.g., modifying an object).
+    *   **Description:** A header appears above the canvas with icon buttons for "Undo", "Redo", "Download", "Add Object", and a text button for "New Image".
 *   **4.2.2. Prompting Modes & Expanded Editor:**
     *   **Description:** The prompt panel provides two modes for editing: "Freeform" and "Structured", with an expanded editing view for detailed work.
-    *   **"Freeform" Mode (Default):**
-        *   The user enters a natural language command (e.g., "make the sky blue").
-        *   This mode is used for both global edits and object modifications.
-    *   **"Structured" Mode:**
-        *   The user can toggle to this mode.
-        *   The application calls the Gemini API to generate a detailed, line-by-line description of the current image.
-        *   **Caching:** This generated description is cached. It will not be re-generated unless the user navigates to a different image in the history (via Undo/Redo).
-        *   The user can edit this textual description directly.
-        *   When "Edit Image" is clicked, the application semantically compares the original and edited descriptions to identify the changes and instructs the model to apply only those changes.
-    *   **Expanded Edit Modal:**
-        *   An "Expand" icon button is available next to the prompt mode toggle.
-        *   Clicking it opens a large modal dialog with a much larger text area, providing a comfortable environment for editing long, structured prompts.
-        *   The modal contains its own toggle and "Edit Image" button, mirroring the main panel's functionality.
 *   **4.2.3. Contextual Object Editing Workflow:**
     *   **Description:** The core workflow of selecting an area, having the AI analyze it, and entering a context-specific "Add" or "Modify" mode.
-    *   **Acceptance Criteria:**
-        *   The "Upload an Image" button is hidden in this state.
-        *   Dragging on the canvas selects an area and triggers the object analysis.
-        *   A static, dashed-yellow box shows the user's current selection.
-        *   The UI adapts to "Add" or "Modify" modes as previously defined.
-*   **4.2.4. User-Choice Object Deletion:**
-    *   **Description:** When a user clicks the Trash Icon in "Modify" mode, they are presented with two choices for deletion to ensure robustness.
-    *   **Acceptance Criteria:**
-        *   A confirmation modal appears.
-        *   The modal presents a primary "Delete" button that triggers the intelligent, AI-driven "Smart Delete" workflow.
-        *   The modal also presents a secondary, more powerful "Force Delete" button.
-        *   Clicking "Force Delete" triggers a two-step "Hard Delete" workflow: the application first deterministically clears the selected area, then asks the AI to perform a simpler "smoothing" inpaint, guaranteeing removal.
-*   **4.2.5. Guided "Add Object" Workflow:**
-    *   **Description:** A new, explicit workflow for adding objects to the canvas, initiated by the user.
-    *   **Acceptance Criteria:**
-        *   The user clicks the "+" (Add Object) icon in the canvas header.
-        *   The application enters a temporary "pre-add" state.
-        *   The prompt panel displays an instructional message guiding the user to select an area on the canvas. The prompt input is disabled.
-        *   The user draws a selection box on the canvas.
-        *   Upon selection, the application transitions to the standard "add" mode, the prompt input becomes active, and the user can describe the object to be added.
+*   **4.2.4. Guided "Add Object" Workflow:**
+    *   **Description:** An explicit workflow for adding objects to the canvas, initiated by the user via the '+' icon.
 
 ### 4.3. Application State & Usability
 
-*   **4.3.1. State Feedback:**
-    *   **Description:** The application provides clear visual feedback for its current state.
+*   **4.3.1. State Feedback & Error Handling:**
+    *   **Description:** The application provides clear visual feedback for its current state, including a unified system for handling API errors.
     *   **Acceptance Criteria:**
         *   Loading spinners and disabled buttons are used during API calls.
-        *   Error messages are displayed for failed operations, including specific messages for invalid API keys.
-        *   Informative text and placeholders guide the user's next action.
-*   **4.3.2. API Key Management:**
-    *   **Description:** A settings modal allows users to provide their own Gemini API key. The application now requires a user-provided key to function.
+        *   All API errors (e.g., invalid key, quota exceeded, server error) are displayed in a dedicated `ErrorModal`.
+        *   The `ErrorModal` shows the specific error message and provides two actions: "Cancel" (to dismiss) and "Update API Key" (to open the Settings modal).
+*   **4.3.2. API Key Management & Rate Limiting:**
+    *   **Description:** The application provides a limited number of free uses with a default key and allows users to provide their own key for extended use.
     *   **Acceptance Criteria:**
-        *   A settings icon in the header opens a modal. This modal also opens automatically if an API call is attempted without a key.
-        *   The modal's title is "Enter Your Gemini API Key" and it provides clear, step-by-step instructions and a link to Google AI Studio.
-        *   The key is stored securely in the browser's local storage and is never sent to application servers.
-        *   API calls will fail if no key is provided.
-*   **4.3.3. Developer Test Harness:**
-    *   **Description:** A hidden developer tool for running automated regression tests.
-    *   **Acceptance Criteria:**
-        *   Typing the special command `_run_test_` in the prompt box activates the Test Harness modal.
-*   **4.3.4. In-App Log Viewer:**
-    *   **Description:** A collapsible log viewer docked at the bottom of the screen for power users or for debugging purposes.
-    *   **Acceptance Criteria:**
-        *   A "Logs" bar is visible at the bottom of the screen.
-        *   The viewer is not available when the Test Harness is active.
-*   **4.3.5. API Call Inspector:**
-    *   **Description:** A powerful debugging tool for visually inspecting the full context of recent Gemini API calls.
-    *   **Acceptance Criteria:**
-        *   A new "API Call Inspector" button is available in the `LogViewer`.
-        *   Clicking the button opens a large modal dialog.
-        *   The modal displays a list of the last 5 API calls.
-        *   Selecting a call from the list shows its full details: the function name, the complete text prompt, all input images, and all output images.
-        *   All displayed images have a download button, allowing the user to save them for offline analysis.
+        *   A settings icon in the header opens a modal for API key management.
+        *   **Session-Only Keys:** User-provided keys are stored in memory for the current session only and are **not** persisted in `localStorage`.
+        *   **Default Key Rate Limiting:**
+            *   Users get 6 free API calls using the default application key.
+            *   This usage count **is** persisted in `localStorage` across sessions.
+            *   The `SettingsModal` displays the number of remaining free uses.
+            *   Once the limit is reached, or if the default key's global quota is exhausted, any action requiring an API call will trigger the `ErrorModal` with a specific message guiding the user to enter their own key.
+*   **4.3.3. Developer Tools:**
+    *   **Test Harness:** A hidden developer tool for running automated regression tests, activated by a special command.
+    *   **Log Viewer & API Inspector:** A collapsible log viewer with an integrated "API Call Inspector" for visually debugging API interactions.
 
 ## 5. Non-Functional Requirements
 
-*   **Performance:** API calls should feel responsive. Loading states must prevent user confusion. Client-side image processing should be efficient.
-*   **Reliability:** The application should gracefully handle API errors (e.g., rate limiting) with retries and clear user feedback.
+*   **Performance:** API calls should feel responsive. Loading states must prevent user confusion.
+*   **Reliability:** The application should gracefully handle API errors with retries and clear user feedback.
 *   **Usability:** The interface must be simple, intuitive, and require no prior training.
 *   **Accessibility:** All interactive elements must be keyboard-accessible and have appropriate ARIA labels.
 
 ## 6. Future Considerations (Out of Scope for V1)
 
 *   **Multi-Object Selection:** Allow users to select and modify multiple objects simultaneously.
-*   **Layer System:** Introduce a concept of layers, similar to professional editing software, for more complex compositions.
-*   **Style Transfer:** Apply the artistic style of one image to another.
-*   **Saving/Loading Projects:** Allow users to save their editing session, including history, and resume later.
-*   **On-Screen Transform Handles:** An experimental feature was built to allow direct manipulation of selected objects with on-screen handles for position, scale, and rotation. This feature was reverted. The core architectural challenge is the mismatch between a client-side, vector-like UI state (x, y, scale) and the server-side, pixel-based reality of the generative model. Each small UI adjustment would require a new API call, leading to high latency and a poor user experience where the visual result might not perfectly match the UI handles. This can be re-evaluated as a future feature if the underlying technology evolves to better support this interaction model.
-*   **Usage-Based Rate Limiting:** Limit the number of API calls a user can make with the default "app key" before prompting them to enter their own key.
+*   **Layer System:** Introduce a concept of layers, similar to professional editing software.
+*   **Saving/Loading Projects:** Allow users to save their editing session, including history.
+*   **On-Screen Transform Handles:** An experimental feature was reverted due to architectural challenges. The core issue is the latency and potential mismatch between a client-side vector-like UI state and the server-side, pixel-based reality of the generative model. This can be re-evaluated if underlying technology evolves.
